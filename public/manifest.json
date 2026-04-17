@@ -2,5 +2,5 @@
   "name": "Slide Builder",
   "code": "plugin.js",
   "description": "Create, edit, and export presentation slides directly into the Penpot canvas",
-  "permissions": ["content:read", "content:write", "allow:downloads"]
+  "permissions": ["content:read", "content:write", "library:read", "allow:downloads"]
 }

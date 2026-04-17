@@ -39,18 +39,28 @@ function handleGetLibraries() {
     const local = penpot.library.local;
     const connected = penpot.library.connected;
 
-    const libraries = [
+    // Only include connected libraries that are actually enabled in the file's
+    // Assets panel — those will have their components accessible (length > 0).
+    // Also deduplicate: skip any entry whose id matches the local library.
+    const connectedEnabled = connected.filter(
+      (lib) => lib.id !== local.id && lib.components.length > 0
+    );
+
+    const allLibraries = [
       {
         id: local.id,
         name: `${local.name} (Local)`,
         numComponents: local.components.length,
       },
-      ...connected.map((lib) => ({
+      ...connectedEnabled.map((lib) => ({
         id: lib.id,
         name: lib.name,
         numComponents: lib.components.length,
       })),
     ];
+
+    // Only surface libraries that have at least one component to use as a template.
+    const libraries = allLibraries.filter((lib) => lib.numComponents > 0);
 
     const msg: PluginMessage = { type: 'libraries', libraries };
     penpot.ui.sendMessage(msg);
