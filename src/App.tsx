@@ -1,10 +1,13 @@
 import { useEffect } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { useSlideStore } from './store';
-import type { PluginMessage } from './types';
+import type { PluginMessage, Slide } from './types';
+import { SLIDE_SIZE_PRESETS } from './types';
 import HomeScreen from './screens/HomeScreen';
 import LibraryPicker from './screens/LibraryPicker';
 import SlideManager from './screens/SlideManager';
 import NewSlideModal from './components/NewSlideModal';
+import ImportProgressOverlay from './components/ImportProgressOverlay';
 
 export default function App() {
   const screen = useSlideStore((s) => s.screen);
@@ -35,10 +38,8 @@ export default function App() {
   // Listen to messages from plugin.ts
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      // Ignore messages not from penpot
       const data = event.data as PluginMessage & { source?: string };
 
-      // Theme change from penpot itself
       if (data.source === 'penpot' && 'theme' in data) {
         setTheme((data as { theme: 'light' | 'dark' }).theme);
         return;
@@ -46,32 +47,81 @@ export default function App() {
 
       if (!data || !data.type) return;
 
+      const store = useSlideStore.getState();
+
       switch (data.type) {
         case 'libraries':
           setLibraries(data.libraries);
           setLibrariesLoading(false);
           break;
+
         case 'components':
           setComponents(data.libraryId, data.components);
           setComponentsLoading(false);
           setPendingThumbnails(data.components.map((c) => c.id));
           break;
+
         case 'thumbnail':
           setThumbnail(data.componentId, data.thumbnail);
           break;
+
         case 'thumbnails-complete':
           setPendingThumbnails([]);
           break;
+
+        case 'import-start':
+          // Job is already initialized by the UI before sending the request;
+          // ignore stale starts from previous requests.
+          break;
+
+        case 'import-progress':
+          store.reportImportProgress(
+            data.requestId,
+            data.index,
+            data.total,
+            data.componentName
+          );
+          break;
+
+        case 'import-item':
+          store.reportImportItem(data.requestId, {
+            componentId: data.componentId,
+            libraryId: data.libraryId,
+            componentName: data.componentName,
+            nodes: data.nodes,
+            background: data.background,
+            width: data.width,
+            height: data.height,
+            importedAt: Date.now(),
+          });
+          break;
+
+        case 'import-item-error':
+          store.reportImportError(data.requestId, {
+            componentId: data.componentId,
+            componentName: data.componentName,
+            message: data.message,
+          });
+          break;
+
+        case 'import-complete': {
+          store.finishImportJob(data.requestId);
+          finalizeImport(data.requestId);
+          break;
+        }
+
         case 'insert-complete':
           setIsInserting(false);
           setInsertResult({ count: data.count });
           break;
+
         case 'error':
           setIsInserting(false);
           setLibrariesLoading(false);
           setComponentsLoading(false);
           console.error('[SlideBuilder]', data.message);
           break;
+
         case 'theme':
           setTheme(data.theme as 'light' | 'dark');
           break;
@@ -80,7 +130,17 @@ export default function App() {
 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [setTheme, setLibraries, setLibrariesLoading, setComponents, setComponentsLoading, setIsInserting, setInsertResult, setThumbnail, setPendingThumbnails]);
+  }, [
+    setTheme,
+    setLibraries,
+    setLibrariesLoading,
+    setComponents,
+    setComponentsLoading,
+    setIsInserting,
+    setInsertResult,
+    setThumbnail,
+    setPendingThumbnails,
+  ]);
 
   return (
     <div className="app-root">
@@ -88,6 +148,56 @@ export default function App() {
       {screen === 'library-picker' && <LibraryPicker />}
       {screen === 'slide-manager' && <SlideManager />}
       {showNewSlideModal && <NewSlideModal />}
+      <ImportProgressOverlay />
     </div>
   );
+}
+
+// Once the plugin reports the batch import is done, build a slide for every
+// item that landed in the cache, transition to the editor, and clear the job
+// after a short delay so the user sees the completion state.
+function finalizeImport(requestId: string) {
+  const state = useSlideStore.getState();
+  const job = state.importJob;
+  if (!job || job.requestId !== requestId) return;
+
+  const thumbnails = state.thumbnailsMap;
+  const defaultSize = SLIDE_SIZE_PRESETS['16:9'];
+
+  const newSlides: Slide[] = [];
+  for (const item of job.items) {
+    const cached = state.getCachedComponent(item.libraryId, item.componentId);
+    if (!cached) continue;
+
+    newSlides.push({
+      id: uuidv4(),
+      name: cached.componentName || item.componentName,
+      source: 'library-component',
+      width: cached.width || item.width || defaultSize.width,
+      height: cached.height || item.height || defaultSize.height,
+      background: cached.background,
+      nodes: cached.nodes,
+      libraryId: cached.libraryId,
+      componentId: cached.componentId,
+      componentName: cached.componentName,
+      thumbnailUrl: thumbnails[cached.componentId],
+      nodesLoading: false,
+    });
+  }
+
+  if (newSlides.length > 0) {
+    state.addSlides(newSlides);
+    state.setScreen('slide-manager');
+  }
+
+  state.clearComponentSelection();
+
+  // Keep the overlay visible briefly so the user sees the completion state,
+  // then dismiss it.
+  window.setTimeout(() => {
+    const current = useSlideStore.getState().importJob;
+    if (current && current.requestId === requestId) {
+      useSlideStore.getState().clearImportJob();
+    }
+  }, 600);
 }

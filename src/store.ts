@@ -6,10 +6,104 @@ import type {
   LibraryInfo,
   ComponentInfo,
   ExportSettings,
+  ImportJob,
+  ImportItemRequest,
+  ImportJobError,
+  ImportedComponentPayload,
 } from './types';
 
 export type Screen = 'home' | 'library-picker' | 'slide-manager';
 export type SidePanel = 'properties' | 'layers';
+
+// ─── Tree Helpers ─────────────────────────────────────────────────────────────
+// All slide node operations are recursive so that grouped / nested imports
+// behave identically to flat top-level nodes.
+
+function mapNodes(
+  nodes: SlideNode[],
+  nodeId: string,
+  fn: (n: SlideNode) => SlideNode | null
+): SlideNode[] {
+  const out: SlideNode[] = [];
+  for (const n of nodes) {
+    if (n.id === nodeId) {
+      const updated = fn(n);
+      if (updated) out.push(updated);
+      continue;
+    }
+    if (n.children && n.children.length > 0) {
+      out.push({ ...n, children: mapNodes(n.children, nodeId, fn) });
+    } else {
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+function reorderSiblings(
+  nodes: SlideNode[],
+  nodeId: string,
+  direction: 'up' | 'down'
+): { nodes: SlideNode[]; moved: boolean } {
+  const idx = nodes.findIndex((n) => n.id === nodeId);
+  if (idx !== -1) {
+    const target = direction === 'up' ? idx - 1 : idx + 1;
+    if (target < 0 || target >= nodes.length) return { nodes, moved: true };
+    const next = [...nodes];
+    [next[idx], next[target]] = [next[target], next[idx]];
+    return { nodes: next, moved: true };
+  }
+  // Recurse into groups
+  let moved = false;
+  const out = nodes.map((n) => {
+    if (moved || !n.children || n.children.length === 0) return n;
+    const res = reorderSiblings(n.children, nodeId, direction);
+    if (res.moved) {
+      moved = true;
+      return { ...n, children: res.nodes };
+    }
+    return n;
+  });
+  return { nodes: out, moved };
+}
+
+function removeNode(nodes: SlideNode[], nodeId: string): SlideNode[] {
+  const out: SlideNode[] = [];
+  for (const n of nodes) {
+    if (n.id === nodeId) continue;
+    if (n.children && n.children.length > 0) {
+      out.push({ ...n, children: removeNode(n.children, nodeId) });
+    } else {
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+export function findNode(nodes: SlideNode[], nodeId: string): SlideNode | null {
+  for (const n of nodes) {
+    if (n.id === nodeId) return n;
+    if (n.children && n.children.length > 0) {
+      const res = findNode(n.children, nodeId);
+      if (res) return res;
+    }
+  }
+  return null;
+}
+
+function cacheKey(libraryId: string, componentId: string): string {
+  return `${libraryId}:${componentId}`;
+}
+
+function regenerateNodeIds(nodes: SlideNode[]): SlideNode[] {
+  return nodes.map((n) => ({
+    ...n,
+    id: uuidv4(),
+    children: n.children ? regenerateNodeIds(n.children) : undefined,
+  }));
+}
+
+// ─── Store Definition ─────────────────────────────────────────────────────────
 
 interface SlideStore {
   // ── Navigation ─────────────────────────────────────────────────────────────
@@ -31,8 +125,8 @@ interface SlideStore {
   componentsLoading: boolean;
   setComponentsLoading: (v: boolean) => void;
 
-  thumbnailsMap: Record<string, string>; // componentId → base64 data URL
-  thumbnailsPending: Set<string>;        // componentIds still being exported
+  thumbnailsMap: Record<string, string>;
+  thumbnailsPending: Set<string>;
   setThumbnail: (componentId: string, thumbnail: string) => void;
   setPendingThumbnails: (ids: string[]) => void;
   clearThumbnails: () => void;
@@ -41,6 +135,28 @@ interface SlideStore {
   toggleComponentSelection: (componentId: string, libraryId: string) => void;
   clearComponentSelection: () => void;
   selectedComponentLibraryMap: Record<string, string>;
+
+  // ── Import Pipeline ────────────────────────────────────────────────────────
+  importJob: ImportJob | null;
+  importedComponentsCache: Record<string, ImportedComponentPayload>;
+  startImportJob: (items: ImportItemRequest[]) => string;
+  reportImportProgress: (
+    requestId: string,
+    index: number,
+    total: number,
+    componentName: string
+  ) => void;
+  reportImportItem: (
+    requestId: string,
+    payload: ImportedComponentPayload
+  ) => void;
+  reportImportError: (requestId: string, error: ImportJobError) => void;
+  finishImportJob: (requestId: string) => void;
+  clearImportJob: () => void;
+  getCachedComponent: (
+    libraryId: string,
+    componentId: string
+  ) => ImportedComponentPayload | null;
 
   // ── Slides ─────────────────────────────────────────────────────────────────
   slides: Slide[];
@@ -63,6 +179,7 @@ interface SlideStore {
   updateNode: (slideId: string, nodeId: string, updates: Partial<SlideNode>) => void;
   deleteNode: (slideId: string, nodeId: string) => void;
   reorderNode: (slideId: string, nodeId: string, direction: 'up' | 'down') => void;
+  setSlideNodes: (slideId: string, nodes: SlideNode[], background?: string) => void;
   selectNode: (nodeId: string | null) => void;
   addSelectedNode: (nodeId: string) => void;
 
@@ -142,6 +259,77 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   clearComponentSelection: () =>
     set({ selectedComponentIds: new Set(), selectedComponentLibraryMap: {} }),
 
+  // ── Import Pipeline ────────────────────────────────────────────────────────
+  importJob: null,
+  importedComponentsCache: {},
+  startImportJob: (items) => {
+    const requestId = uuidv4();
+    set({
+      importJob: {
+        requestId,
+        items,
+        total: items.length,
+        done: 0,
+        failed: 0,
+        errors: [],
+        status: 'running',
+        currentComponentName: items[0]?.componentName,
+      },
+    });
+    return requestId;
+  },
+  reportImportProgress: (requestId, _index, _total, componentName) =>
+    set((state) => {
+      if (!state.importJob || state.importJob.requestId !== requestId) return state;
+      return {
+        importJob: {
+          ...state.importJob,
+          currentComponentName: componentName,
+        },
+      };
+    }),
+  reportImportItem: (requestId, payload) =>
+    set((state) => {
+      if (!state.importJob || state.importJob.requestId !== requestId) return state;
+      const key = cacheKey(payload.libraryId, payload.componentId);
+      return {
+        importedComponentsCache: {
+          ...state.importedComponentsCache,
+          [key]: payload,
+        },
+        importJob: {
+          ...state.importJob,
+          done: state.importJob.done + 1,
+        },
+      };
+    }),
+  reportImportError: (requestId, error) =>
+    set((state) => {
+      if (!state.importJob || state.importJob.requestId !== requestId) return state;
+      return {
+        importJob: {
+          ...state.importJob,
+          failed: state.importJob.failed + 1,
+          errors: [...state.importJob.errors, error],
+        },
+      };
+    }),
+  finishImportJob: (requestId) =>
+    set((state) => {
+      if (!state.importJob || state.importJob.requestId !== requestId) return state;
+      return {
+        importJob: {
+          ...state.importJob,
+          status: 'complete',
+        },
+      };
+    }),
+  clearImportJob: () => set({ importJob: null }),
+  getCachedComponent: (libraryId, componentId) => {
+    const key = cacheKey(libraryId, componentId);
+    return get().importedComponentsCache[key] ?? null;
+  },
+
   // ── Slides ─────────────────────────────────────────────────────────────────
   slides: [],
   activeSlideId: null,
@@ -179,7 +367,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       ...src,
       id: uuidv4(),
       name: `${src.name} (copy)`,
-      nodes: src.nodes.map((n) => ({ ...n, id: uuidv4() })),
+      nodes: regenerateNodeIds(src.nodes),
     };
     set((state) => {
       const idx = state.slides.findIndex((s) => s.id === id);
@@ -199,6 +387,21 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     set({ activeSlideId, selectedNodeIds: [] }),
 
   // ── Nodes ──────────────────────────────────────────────────────────────────
+  // setSlideNodes keeps the original source (library-component vs custom) so
+  // imported slides remain traceable to their library origin after editing.
+  setSlideNodes: (slideId, nodes, background) =>
+    set((state) => ({
+      slides: state.slides.map((s) =>
+        s.id === slideId
+          ? {
+              ...s,
+              nodes,
+              nodesLoading: false,
+              ...(background ? { background } : {}),
+            }
+          : s
+      ),
+    })),
   addNode: (slideId, node) =>
     set((state) => ({
       slides: state.slides.map((s) =>
@@ -211,7 +414,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         s.id === slideId
           ? {
               ...s,
-              nodes: s.nodes.map((n) => (n.id === nodeId ? { ...n, ...updates } : n)),
+              nodes: mapNodes(s.nodes, nodeId, (n) => ({ ...n, ...updates })),
             }
           : s
       ),
@@ -219,9 +422,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   deleteNode: (slideId, nodeId) =>
     set((state) => ({
       slides: state.slides.map((s) =>
-        s.id === slideId
-          ? { ...s, nodes: s.nodes.filter((n) => n.id !== nodeId) }
-          : s
+        s.id === slideId ? { ...s, nodes: removeNode(s.nodes, nodeId) } : s
       ),
       selectedNodeIds: state.selectedNodeIds.filter((id) => id !== nodeId),
     })),
@@ -229,13 +430,8 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     set((state) => ({
       slides: state.slides.map((s) => {
         if (s.id !== slideId) return s;
-        const nodes = [...s.nodes];
-        const idx = nodes.findIndex((n) => n.id === nodeId);
-        if (idx === -1) return s;
-        const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-        if (targetIdx < 0 || targetIdx >= nodes.length) return s;
-        [nodes[idx], nodes[targetIdx]] = [nodes[targetIdx], nodes[idx]];
-        return { ...s, nodes };
+        const res = reorderSiblings(s.nodes, nodeId, direction);
+        return { ...s, nodes: res.nodes };
       }),
     })),
   selectNode: (nodeId) =>

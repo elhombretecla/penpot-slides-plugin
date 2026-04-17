@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useSlideStore } from '../store';
 import { penpotApi } from '../api';
 import { isSlideLike, getFilteredComponents } from '../utils';
-import type { Slide, ComponentInfo } from '../types';
+import type { Slide, ComponentInfo, ImportItemRequest } from '../types';
 import { SLIDE_SIZE_PRESETS } from '../types';
 
 export default function LibraryPicker() {
@@ -24,6 +24,8 @@ export default function LibraryPicker() {
   const activeLibraryId = useSlideStore((s) => s.activeLibraryId);
   const setActiveLibraryId = useSlideStore((s) => s.setActiveLibraryId);
   const clearThumbnails = useSlideStore((s) => s.clearThumbnails);
+  const startImportJob = useSlideStore((s) => s.startImportJob);
+  const getCachedComponent = useSlideStore((s) => s.getCachedComponent);
 
   useEffect(() => {
     if (libraries.length === 0) {
@@ -64,28 +66,65 @@ export default function LibraryPicker() {
   const filteredComponents = getFilteredComponents(currentComponents, searchQuery);
   const grouped = groupBySection(filteredComponents);
 
+  const thumbnailsMap = useSlideStore((s) => s.thumbnailsMap);
+
   function handleAddSelected() {
-    const newSlides: Slide[] = Array.from(selectedComponentIds).map((componentId, idx) => {
+    const selectedIds = Array.from(selectedComponentIds);
+    if (selectedIds.length === 0) return;
+
+    const size = SLIDE_SIZE_PRESETS['16:9'];
+
+    // Split into cached (instant) and uncached (need a plugin round-trip).
+    const cachedSlides: Slide[] = [];
+    const toImport: ImportItemRequest[] = [];
+
+    for (const componentId of selectedIds) {
       const libraryId = selectedComponentLibraryMap[componentId] ?? '';
       const comp = currentComponents.find((c) => c.id === componentId);
-      const name = comp?.name ?? `Slide ${idx + 1}`;
-      const size = SLIDE_SIZE_PRESETS['16:9'];
-      return {
-        id: uuidv4(),
-        name,
-        source: 'library-component' as const,
-        width: comp?.width ?? size.width,
-        height: comp?.height ?? size.height,
-        background: '#18181a',
-        nodes: [],
-        libraryId,
-        componentId,
-        componentName: name,
-      };
-    });
-    addSlides(newSlides);
-    clearComponentSelection();
-    setScreen('slide-manager');
+      const name = comp?.name ?? 'Component';
+
+      const cached = getCachedComponent(libraryId, componentId);
+      if (cached) {
+        cachedSlides.push({
+          id: uuidv4(),
+          name: cached.componentName || name,
+          source: 'library-component',
+          width: cached.width || comp?.width || size.width,
+          height: cached.height || comp?.height || size.height,
+          background: cached.background,
+          nodes: cached.nodes,
+          libraryId: cached.libraryId,
+          componentId: cached.componentId,
+          componentName: cached.componentName,
+          thumbnailUrl: thumbnailsMap[componentId],
+          nodesLoading: false,
+        });
+      } else {
+        toImport.push({
+          componentId,
+          libraryId,
+          componentName: name,
+          width: comp?.width,
+          height: comp?.height,
+        });
+      }
+    }
+
+    if (cachedSlides.length > 0) {
+      addSlides(cachedSlides);
+    }
+
+    if (toImport.length === 0) {
+      // Everything was cached — move straight to the editor.
+      clearComponentSelection();
+      setScreen('slide-manager');
+      return;
+    }
+
+    // Kick off the blocking import job. App.tsx will create slides and
+    // transition to the editor when `import-complete` comes back.
+    const requestId = startImportJob(toImport);
+    penpotApi.importComponents(requestId, toImport);
   }
 
   return (

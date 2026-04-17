@@ -34,14 +34,12 @@ export default function SlideCanvas({ slide }: Props) {
     );
   }
 
-  // Scale factor: fit slide into canvas display area
   const scaleX = CANVAS_MAX_WIDTH / slide.width;
   const scaleY = CANVAS_MAX_HEIGHT / slide.height;
   const scale = Math.min(scaleX, scaleY, 1);
   const displayW = slide.width * scale;
   const displayH = slide.height * scale;
 
-  // Convert canvas-relative coords to slide-space coords
   function toSlideCoords(canvasX: number, canvasY: number) {
     return { x: canvasX / scale, y: canvasY / scale };
   }
@@ -49,7 +47,6 @@ export default function SlideCanvas({ slide }: Props) {
   const handleCanvasMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (activeTool === 'select') {
-        // Click on canvas background → deselect
         if (e.target === canvasRef.current || (e.target as HTMLElement).classList.contains('canvas-bg')) {
           selectNode(null);
           setEditingNodeId(null);
@@ -96,7 +93,6 @@ export default function SlideCanvas({ slide }: Props) {
       const MIN_SIZE = 10;
       if (drawingRect.w < MIN_SIZE || drawingRect.h < MIN_SIZE) {
         setDrawingRect(null);
-        // Single click: create at default size at that position
         const { x, y } = toSlideCoords(drawingRect.x, drawingRect.y);
         createNodeAtPos(slideId, x, y, 200, 100);
         setActiveTool('select');
@@ -187,46 +183,46 @@ export default function SlideCanvas({ slide }: Props) {
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
 
-          {slide.source === 'library-component' ? (
-            <div className="canvas-component-overlay">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.4">
-                <rect x="3" y="3" width="8" height="8" rx="1"/>
-                <rect x="13" y="3" width="8" height="8" rx="1"/>
-                <rect x="3" y="13" width="8" height="8" rx="1"/>
-                <rect x="13" y="13" width="8" height="8" rx="1"/>
-              </svg>
-              <p>{slide.componentName}</p>
-              <p className="canvas-component-hint">Component from library. Will be instantiated when exported.</p>
-            </div>
+          {slide.nodesLoading ? (
+            slide.thumbnailUrl ? (
+              <img
+                src={slide.thumbnailUrl}
+                alt={slide.componentName ?? slide.name}
+                style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
+                draggable={false}
+              />
+            ) : (
+              <div className="canvas-component-overlay">
+                <div className="spinner" />
+                <p className="canvas-component-hint">Loading slide content…</p>
+              </div>
+            )
           ) : (
-            slide.nodes.filter((n) => n.visible).map((node) => (
+            slide.nodes.map((node) => (
               <CanvasNode
                 key={node.id}
                 node={node}
                 scale={scale}
                 slideId={slide.id}
-                isSelected={selectedNodeIds.includes(node.id)}
-                isEditing={editingNodeId === node.id}
-                onSelect={(e) => {
-                  e.stopPropagation();
+                activeTool={activeTool}
+                selectedNodeIds={selectedNodeIds}
+                editingNodeId={editingNodeId}
+                onSelect={(id) => {
                   if (activeTool === 'select') {
-                    selectNode(node.id);
+                    selectNode(id);
                     setEditingNodeId(null);
                   }
                 }}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  if (node.type === 'text') {
-                    setEditingNodeId(node.id);
-                    selectNode(node.id);
-                  }
+                onStartEditing={(id) => {
+                  setEditingNodeId(id);
+                  selectNode(id);
                 }}
-                onTextChange={(text) => updateNode(slide.id, node.id, { text })}
                 onStopEditing={() => setEditingNodeId(null)}
-                onDrag={(dx, dy) => {
-                  updateNode(slide.id, node.id, {
-                    x: node.x + dx / scale,
-                    y: node.y + dy / scale,
+                onTextChange={(id, text) => updateNode(slide.id, id, { text })}
+                onDrag={(id, dx, dy, n) => {
+                  updateNode(slide.id, id, {
+                    x: n.x + dx / scale,
+                    y: n.y + dy / scale,
                   });
                 }}
               />
@@ -254,37 +250,46 @@ export default function SlideCanvas({ slide }: Props) {
   );
 }
 
-// ─── Canvas Node ──────────────────────────────────────────────────────────────
+// ─── Canvas Node (recursive) ──────────────────────────────────────────────────
 
 interface CanvasNodeProps {
   node: SlideNode;
   scale: number;
   slideId: string;
-  isSelected: boolean;
-  isEditing: boolean;
-  onSelect: (e: React.MouseEvent) => void;
-  onDoubleClick: (e: React.MouseEvent) => void;
-  onTextChange: (text: string) => void;
+  activeTool: Tool;
+  selectedNodeIds: string[];
+  editingNodeId: string | null;
+  onSelect: (id: string) => void;
+  onStartEditing: (id: string) => void;
   onStopEditing: () => void;
-  onDrag: (dx: number, dy: number) => void;
+  onTextChange: (id: string, text: string) => void;
+  onDrag: (id: string, dx: number, dy: number, node: SlideNode) => void;
 }
 
 function CanvasNode({
   node,
   scale,
-  isSelected,
-  isEditing,
+  slideId,
+  activeTool,
+  selectedNodeIds,
+  editingNodeId,
   onSelect,
-  onDoubleClick,
-  onTextChange,
+  onStartEditing,
   onStopEditing,
+  onTextChange,
   onDrag,
 }: CanvasNodeProps) {
   const dragStart = useRef<{ mouseX: number; mouseY: number } | null>(null);
+  const isSelected = selectedNodeIds.includes(node.id);
+  const isEditing = editingNodeId === node.id;
+
+  if (!node.visible) return null;
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      onSelect(e);
+      if (activeTool !== 'select') return;
+      e.stopPropagation();
+      onSelect(node.id);
       if (isEditing) return;
       dragStart.current = { mouseX: e.clientX, mouseY: e.clientY };
 
@@ -293,7 +298,7 @@ function CanvasNode({
         const dx = moveEvent.clientX - dragStart.current.mouseX;
         const dy = moveEvent.clientY - dragStart.current.mouseY;
         dragStart.current = { mouseX: moveEvent.clientX, mouseY: moveEvent.clientY };
-        onDrag(dx, dy);
+        onDrag(node.id, dx, dy, node);
       };
 
       const handleMouseUp = () => {
@@ -305,10 +310,19 @@ function CanvasNode({
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     },
-    [isEditing, onDrag, onSelect]
+    [activeTool, isEditing, onDrag, onSelect, node]
   );
 
-  const nodeStyle: React.CSSProperties = {
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (node.type !== 'text') return;
+      e.stopPropagation();
+      onStartEditing(node.id);
+    },
+    [node.id, node.type, onStartEditing]
+  );
+
+  const wrapperStyle: React.CSSProperties = {
     position: 'absolute',
     left: node.x * scale,
     top: node.y * scale,
@@ -316,14 +330,54 @@ function CanvasNode({
     height: node.height * scale,
     opacity: node.opacity,
     transform: `rotate(${node.rotation}deg)`,
-    cursor: isEditing ? 'text' : 'move',
+    cursor: activeTool === 'select' ? (isEditing ? 'text' : 'move') : 'crosshair',
     userSelect: 'none',
     boxSizing: 'border-box',
   };
 
   if (isSelected && !isEditing) {
-    nodeStyle.outline = '2px solid #6457f0';
-    nodeStyle.outlineOffset = '1px';
+    wrapperStyle.outline = '2px solid #6457f0';
+    wrapperStyle.outlineOffset = '1px';
+  }
+
+  // Groups render a container and recurse into children (children are
+  // positioned relative to the group, so we just render them inside).
+  if (node.type === 'group') {
+    const groupStyle: React.CSSProperties = {
+      ...wrapperStyle,
+      background:
+        node.fill && node.clipContent
+          ? node.fill
+          : 'transparent',
+      overflow: node.clipContent ? 'hidden' : 'visible',
+    };
+
+    return (
+      <div
+        style={groupStyle}
+        onMouseDown={handleMouseDown}
+        onDoubleClick={handleDoubleClick}
+        data-node-id={node.id}
+        data-node-type="group"
+      >
+        {node.children?.map((child) => (
+          <CanvasNode
+            key={child.id}
+            node={child}
+            scale={scale}
+            slideId={slideId}
+            activeTool={activeTool}
+            selectedNodeIds={selectedNodeIds}
+            editingNodeId={editingNodeId}
+            onSelect={onSelect}
+            onStartEditing={onStartEditing}
+            onStopEditing={onStopEditing}
+            onTextChange={onTextChange}
+            onDrag={onDrag}
+          />
+        ))}
+      </div>
+    );
   }
 
   const content = (() => {
@@ -364,7 +418,7 @@ function CanvasNode({
                 padding: 0,
               }}
               value={node.text ?? ''}
-              onChange={(e) => onTextChange(e.target.value)}
+              onChange={(e) => onTextChange(node.id, e.target.value)}
               onBlur={onStopEditing}
               onKeyDown={(e) => {
                 if (e.key === 'Escape') onStopEditing();
@@ -405,14 +459,89 @@ function CanvasNode({
       );
     }
 
+    if (node.type === 'image' || node.type === 'path') {
+      if (node.imageUrl) {
+        return (
+          <img
+            src={node.imageUrl}
+            alt={node.name}
+            draggable={false}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'contain',
+              pointerEvents: 'none',
+              userSelect: 'none',
+            }}
+          />
+        );
+      }
+      return (
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            background: node.fill ?? 'rgba(100,87,240,0.15)',
+            border: '1px dashed rgba(100,87,240,0.5)',
+          }}
+        />
+      );
+    }
+
+    if (node.type === 'component-instance') {
+      return (
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            position: 'relative',
+            background: 'rgba(100,87,240,0.08)',
+            border: '1px dashed rgba(100,87,240,0.4)',
+          }}
+        >
+          {node.imageUrl ? (
+            <img
+              src={node.imageUrl}
+              alt={node.componentName ?? node.name}
+              draggable={false}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'contain',
+                pointerEvents: 'none',
+                userSelect: 'none',
+              }}
+            />
+          ) : null}
+          <span
+            style={{
+              position: 'absolute',
+              top: 4,
+              left: 4,
+              padding: '1px 4px',
+              fontSize: 9 * Math.max(scale, 0.5),
+              borderRadius: 2,
+              background: 'rgba(100,87,240,0.9)',
+              color: '#fff',
+              pointerEvents: 'none',
+            }}
+          >
+            Instance
+          </span>
+        </div>
+      );
+    }
+
     return null;
   })();
 
   return (
     <div
-      style={nodeStyle}
+      style={wrapperStyle}
       onMouseDown={handleMouseDown}
-      onDoubleClick={onDoubleClick}
+      onDoubleClick={handleDoubleClick}
+      data-node-id={node.id}
+      data-node-type={node.type}
     >
       {content}
     </div>
@@ -441,7 +570,6 @@ function ToolButton({ active, onClick, title, children }: ToolButtonProps) {
   );
 }
 
-// Keyboard shortcuts
 function useKeyboardTools(setActiveTool: (t: Tool) => void) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -456,5 +584,4 @@ function useKeyboardTools(setActiveTool: (t: Tool) => void) {
   }, [setActiveTool]);
 }
 
-// Re-export to allow SlideCanvas to use keyboard hooks
 export { useKeyboardTools };

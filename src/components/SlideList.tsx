@@ -133,56 +133,136 @@ function SlideItem({
 
 // ─── Slide Thumbnail ──────────────────────────────────────────────────────────
 
+import type { SlideNode } from '../types';
+
+function flattenLeaves(
+  nodes: SlideNode[],
+  offsetX = 0,
+  offsetY = 0
+): Array<SlideNode & { absX: number; absY: number }> {
+  const out: Array<SlideNode & { absX: number; absY: number }> = [];
+  for (const n of nodes) {
+    if (!n.visible) continue;
+    const absX = offsetX + n.x;
+    const absY = offsetY + n.y;
+    if (n.type === 'group') {
+      if (n.clipContent && n.fill) {
+        out.push({ ...n, absX, absY });
+      }
+      if (n.children && n.children.length > 0) {
+        out.push(...flattenLeaves(n.children, absX, absY));
+      }
+      continue;
+    }
+    out.push({ ...n, absX, absY });
+  }
+  return out;
+}
+
 function SlideThumbnail({ slide }: { slide: Slide }) {
   const scale = 160 / slide.width;
+
+  const thumbContent = () => {
+    if (slide.nodesLoading) {
+      if (slide.thumbnailUrl) {
+        return (
+          <img
+            src={slide.thumbnailUrl}
+            alt={slide.name}
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            draggable={false}
+          />
+        );
+      }
+      return (
+        <div className="slide-thumb-component-label">
+          <div className="spinner spinner--sm" />
+        </div>
+      );
+    }
+
+    const leaves = flattenLeaves(slide.nodes);
+
+    return (
+      <div className="slide-thumb-inner" style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+        {leaves.map((node) => {
+          const baseStyle: React.CSSProperties = {
+            position: 'absolute',
+            left: node.absX,
+            top: node.absY,
+            width: node.width,
+            height: node.height,
+            opacity: node.opacity,
+            transform: `rotate(${node.rotation}deg)`,
+          };
+
+          if (node.type === 'text') {
+            return (
+              <div
+                key={node.id}
+                className="slide-thumb-node"
+                style={{
+                  ...baseStyle,
+                  color: node.fontColor ?? '#ffffff',
+                  fontSize: node.fontSize ?? 16,
+                  fontWeight: node.fontWeight ?? '400',
+                  textAlign: node.textAlign ?? 'left',
+                  overflow: 'hidden',
+                  wordBreak: 'break-word',
+                  lineHeight: 1.2,
+                }}
+              >
+                {node.text}
+              </div>
+            );
+          }
+
+          if (node.type === 'image' || node.type === 'path' || node.type === 'component-instance') {
+            if (node.imageUrl) {
+              return (
+                <img
+                  key={node.id}
+                  src={node.imageUrl}
+                  alt={node.name}
+                  draggable={false}
+                  style={{ ...baseStyle, objectFit: 'contain' }}
+                />
+              );
+            }
+            return (
+              <div
+                key={node.id}
+                className="slide-thumb-node"
+                style={{
+                  ...baseStyle,
+                  background: node.fill ?? 'rgba(100,87,240,0.2)',
+                }}
+              />
+            );
+          }
+
+          return (
+            <div
+              key={node.id}
+              className="slide-thumb-node"
+              style={{
+                ...baseStyle,
+                background: node.fill ?? '#6457f0',
+                borderRadius: node.type === 'ellipse' ? '50%' : (node.borderRadius ?? 0),
+              }}
+            />
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <div
       className="slide-thumb"
       style={{ background: slide.background }}
     >
-      {slide.source === 'library-component' ? (
-        <div className="slide-thumb-component-label">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="8" height="8" rx="1"/>
-            <rect x="13" y="3" width="8" height="8" rx="1"/>
-            <rect x="3" y="13" width="8" height="8" rx="1"/>
-          </svg>
-          <span>{slide.componentName ?? slide.name}</span>
-        </div>
-      ) : (
-        <div className="slide-thumb-inner" style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
-          {slide.nodes.filter((n) => n.visible).map((node) => (
-            <div
-              key={node.id}
-              className="slide-thumb-node"
-              style={{
-                position: 'absolute',
-                left: node.x,
-                top: node.y,
-                width: node.width,
-                height: node.height,
-                opacity: node.opacity,
-                transform: `rotate(${node.rotation}deg)`,
-                ...(node.type === 'text' ? {
-                  color: node.fontColor ?? '#ffffff',
-                  fontSize: (node.fontSize ?? 16),
-                  fontWeight: node.fontWeight ?? '400',
-                  textAlign: node.textAlign ?? 'left',
-                  overflow: 'hidden',
-                  wordBreak: 'break-word',
-                  lineHeight: 1.2,
-                } : {
-                  background: node.fill ?? '#6457f0',
-                  borderRadius: node.type === 'ellipse' ? '50%' : (node.borderRadius ?? 0),
-                }),
-              }}
-            >
-              {node.type === 'text' && node.text}
-            </div>
-          ))}
-        </div>
-      )}
+      {thumbContent()}
     </div>
   );
 }

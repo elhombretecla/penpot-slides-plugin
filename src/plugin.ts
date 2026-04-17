@@ -1,4 +1,11 @@
-import type { UIMessage, PluginMessage, Slide, ExportSettings } from './types';
+import type {
+  UIMessage,
+  PluginMessage,
+  Slide,
+  SlideNode,
+  ExportSettings,
+  ImportItemRequest,
+} from './types';
 
 // Open the plugin UI at a comfortable size for a slide builder
 penpot.ui.open('Slide Builder', `?theme=${penpot.theme}`, {
@@ -15,6 +22,9 @@ penpot.ui.onMessage<UIMessage>((message) => {
       break;
     case 'get-components':
       handleGetComponents(message.libraryId);
+      break;
+    case 'import-components':
+      handleImportComponents(message.requestId, message.items);
       break;
     case 'insert-into-canvas':
       handleInsertIntoCanvas(message.slides, message.settings);
@@ -94,7 +104,7 @@ async function handleGetComponents(libraryId: string) {
       }
       return {
         id: comp.id,
-        libraryId: comp.libraryId,
+        libraryId,
         name: comp.name,
         path: comp.path ?? '',
         width,
@@ -141,6 +151,496 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+// ─── Component Import Pipeline ────────────────────────────────────────────────
+
+type AnyShape = ReturnType<typeof penpot.createBoard>['children'][number];
+
+async function handleImportComponents(requestId: string, items: ImportItemRequest[]) {
+  const startMsg: PluginMessage = {
+    type: 'import-start',
+    requestId,
+    total: items.length,
+  };
+  penpot.ui.sendMessage(startMsg);
+
+  let success = 0;
+  let failed = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+
+    const progressMsg: PluginMessage = {
+      type: 'import-progress',
+      requestId,
+      index: i,
+      total: items.length,
+      componentId: item.componentId,
+      componentName: item.componentName,
+    };
+    penpot.ui.sendMessage(progressMsg);
+
+    try {
+      const result = await importSingleComponent(item);
+
+      const itemMsg: PluginMessage = {
+        type: 'import-item',
+        requestId,
+        componentId: item.componentId,
+        libraryId: item.libraryId,
+        componentName: item.componentName,
+        nodes: result.nodes,
+        background: result.background,
+        width: result.width,
+        height: result.height,
+      };
+      penpot.ui.sendMessage(itemMsg);
+      success++;
+    } catch (err) {
+      failed++;
+      const errMsg: PluginMessage = {
+        type: 'import-item-error',
+        requestId,
+        componentId: item.componentId,
+        componentName: item.componentName,
+        message: stringifyErr(err),
+      };
+      penpot.ui.sendMessage(errMsg);
+    }
+  }
+
+  const completeMsg: PluginMessage = {
+    type: 'import-complete',
+    requestId,
+    success,
+    failed,
+  };
+  penpot.ui.sendMessage(completeMsg);
+}
+
+interface ImportResult {
+  nodes: SlideNode[];
+  background: string;
+  width: number;
+  height: number;
+}
+
+// Import a single component by reading its main instance (cheap) or, if that
+// fails, by creating a temporary off-canvas instance and cleaning it up. As a
+// last resort, fall back to a single full-size image node using the component
+// PNG export so the user always has something to work with.
+async function importSingleComponent(item: ImportItemRequest): Promise<ImportResult> {
+  const allLibs = [penpot.library.local, ...penpot.library.connected];
+  const lib = allLibs.find((l) => l.id === item.libraryId);
+  if (!lib) {
+    throw new Error(`Library not found (id ${item.libraryId}).`);
+  }
+  const comp = lib.components.find((c) => c.id === item.componentId);
+  if (!comp) {
+    throw new Error(`Component not found inside "${lib.name}".`);
+  }
+
+  const errors: string[] = [];
+
+  // 1. Try mainInstance first — cheapest and does not mutate the document.
+  let main: AnyShape | null = null;
+  try {
+    main = comp.mainInstance() ?? null;
+  } catch (err) {
+    errors.push(`mainInstance(): ${stringifyErr(err)}`);
+  }
+
+  if (main) {
+    try {
+      return await buildResultFromRoot(main, item);
+    } catch (err) {
+      errors.push(`read mainInstance tree: ${stringifyErr(err)}`);
+    }
+  }
+
+  // 2. Fallback: create a temporary instance far off-canvas, read, remove.
+  let tempInstance: AnyShape | null = null;
+  try {
+    try {
+      tempInstance = comp.instance() ?? null;
+    } catch (err) {
+      errors.push(`instance(): ${stringifyErr(err)}`);
+    }
+
+    if (tempInstance) {
+      try {
+        tempInstance.x = -100000;
+        tempInstance.y = -100000;
+        return await buildResultFromRoot(tempInstance, item);
+      } catch (err) {
+        errors.push(`read temporary instance tree: ${stringifyErr(err)}`);
+      }
+    }
+  } finally {
+    if (tempInstance) {
+      try {
+        tempInstance.remove();
+      } catch {
+        // Leave it off-canvas if we cannot clean up.
+      }
+    }
+  }
+
+  // 3. Last-resort fallback: export the main instance (or a temp instance) as
+  //    a single PNG so the user can at least see the component inside the
+  //    plugin. Keeps position/size; children become non-editable.
+  const snapshotRoot = main;
+  if (snapshotRoot) {
+    const imageUrl = await safeExportPng(snapshotRoot, 1);
+    if (imageUrl) {
+      const width = snapshotRoot.width ?? item.width ?? 1280;
+      const height = snapshotRoot.height ?? item.height ?? 720;
+      const background = readBackground(snapshotRoot) ?? '#18181a';
+      return {
+        nodes: [
+          {
+            id: `${item.componentId}-snapshot`,
+            type: 'image',
+            name: item.componentName,
+            x: 0,
+            y: 0,
+            width,
+            height,
+            visible: true,
+            opacity: 1,
+            rotation: 0,
+            imageUrl,
+            sourceType: 'component-snapshot',
+          },
+        ],
+        background,
+        width,
+        height,
+      };
+    }
+  }
+
+  throw new Error(
+    errors.length > 0
+      ? errors.join(' · ')
+      : 'Component could not be read from the library.'
+  );
+}
+
+async function buildResultFromRoot(
+  root: AnyShape,
+  item: ImportItemRequest
+): Promise<ImportResult> {
+  const width = root.width ?? item.width ?? 1280;
+  const height = root.height ?? item.height ?? 720;
+  const background = readBackground(root) ?? '#18181a';
+  const nodes = await importRootShape(root);
+  return { nodes, background, width, height };
+}
+
+// Read the content of a component root. If the root is a container (board /
+// group / boolean) with children, iterate them relative to the root origin.
+// If the root is a single shape (e.g. a text-only component) or has no
+// children, import the root itself as a single top-level leaf at (0,0).
+async function importRootShape(root: AnyShape): Promise<SlideNode[]> {
+  const rootX = root.x ?? 0;
+  const rootY = root.y ?? 0;
+  const children = readChildren(root);
+
+  if (children.length > 0) {
+    const out: SlideNode[] = [];
+    for (const child of children) {
+      try {
+        const node = await importShape(child, rootX, rootY);
+        if (node) out.push(node);
+      } catch {
+        // Skip children that fail to convert
+      }
+    }
+    return out;
+  }
+
+  try {
+    const node = await importShape(root, rootX, rootY);
+    if (!node) return [];
+    // Force the single-leaf root to (0,0) in slide coordinates.
+    return [{ ...node, x: 0, y: 0 }];
+  } catch {
+    return [];
+  }
+}
+
+function stringifyErr(err: unknown): string {
+  if (err instanceof Error) return err.message || err.toString();
+  try {
+    return typeof err === 'string' ? err : JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+// Recursive importer: converts a Penpot shape (possibly containing other shapes)
+// into a SlideNode tree. Coordinates are stored relative to `parentX`/`parentY`
+// so groups keep their children logically nested.
+async function importShape(
+  shape: AnyShape,
+  parentX: number,
+  parentY: number
+): Promise<SlideNode | null> {
+  const absX = shape.x ?? 0;
+  const absY = shape.y ?? 0;
+  const width = shape.width ?? 0;
+  const height = shape.height ?? 0;
+
+  const base = {
+    id: shape.id,
+    name: shape.name ?? 'Element',
+    x: absX - parentX,
+    y: absY - parentY,
+    width,
+    height,
+    visible: !shape.hidden,
+    opacity: shape.opacity ?? 1,
+    rotation: shape.rotation ?? 0,
+    sourceType: shape.type,
+  };
+
+  const fills = 'fills' in shape && Array.isArray(shape.fills) ? shape.fills : [];
+  const firstFill = fills[0];
+  const fillColor = firstFill?.fillColor;
+  const fillOpacity = firstFill?.fillOpacity ?? 1;
+
+  const strokes = 'strokes' in shape && Array.isArray(shape.strokes) ? shape.strokes : [];
+  const firstStroke = strokes[0];
+  const strokeColor = firstStroke?.strokeColor;
+  const strokeWidth = firstStroke?.strokeWidth;
+
+  // A component instance is typically a board that exposes a `component` ref.
+  // We treat it as a single editable block, keeping the link metadata so the
+  // user can re-apply it during export.
+  const componentRef = detectComponentInstance(shape);
+  if (componentRef) {
+    const imageUrl = await safeExportPng(shape, 0.5);
+    return {
+      ...base,
+      type: 'component-instance',
+      libraryId: componentRef.libraryId,
+      componentId: componentRef.componentId,
+      componentName: componentRef.name,
+      imageUrl,
+    };
+  }
+
+  // Groups / boolean operations — keep the hierarchy so users can edit children.
+  if (shape.type === 'group' || shape.type === 'boolean') {
+    const children = readChildren(shape);
+    const nestedNodes: SlideNode[] = [];
+    for (const c of children) {
+      try {
+        const n = await importShape(c, absX, absY);
+        if (n) nestedNodes.push(n);
+      } catch {
+        // skip child
+      }
+    }
+    return {
+      ...base,
+      type: 'group',
+      children: nestedNodes,
+    };
+  }
+
+  // Nested boards keep hierarchy but also carry a background fill.
+  if (shape.type === 'board') {
+    const children = readChildren(shape);
+    const nestedNodes: SlideNode[] = [];
+    for (const c of children) {
+      try {
+        const n = await importShape(c, absX, absY);
+        if (n) nestedNodes.push(n);
+      } catch {
+        // skip child
+      }
+    }
+    return {
+      ...base,
+      type: 'group',
+      clipContent: true,
+      fill: fillColor,
+      fillOpacity,
+      children: nestedNodes,
+    };
+  }
+
+  if (shape.type === 'text') {
+    const textAlign =
+      shape.align !== 'mixed' && shape.align !== 'justify' && shape.align
+        ? (shape.align as 'left' | 'center' | 'right')
+        : 'left';
+
+    return {
+      ...base,
+      type: 'text',
+      text: shape.characters ?? '',
+      fontSize: shape.fontSize !== 'mixed' ? parseFloat(String(shape.fontSize)) || 16 : 16,
+      fontWeight: shape.fontWeight !== 'mixed' ? String(shape.fontWeight) : '400',
+      fontFamily: shape.fontFamily !== 'mixed' ? String(shape.fontFamily) : 'sans-serif',
+      fontColor: firstFill?.fillColor ?? '#ffffff',
+      textAlign,
+      lineHeight:
+        shape.lineHeight !== 'mixed' ? parseFloat(String(shape.lineHeight)) || 1.4 : 1.4,
+      letterSpacing:
+        shape.letterSpacing !== 'mixed' ? parseFloat(String(shape.letterSpacing)) || 0 : 0,
+    };
+  }
+
+  if (shape.type === 'ellipse') {
+    return {
+      ...base,
+      type: 'ellipse',
+      fill: fillColor ?? '#6457f0',
+      fillOpacity,
+      strokeColor,
+      strokeWidth,
+    };
+  }
+
+  if (shape.type === 'rectangle') {
+    return {
+      ...base,
+      type: 'rect',
+      fill: fillColor ?? '#6457f0',
+      fillOpacity,
+      strokeColor,
+      strokeWidth,
+      borderRadius: ('borderRadius' in shape ? (shape.borderRadius as number) : 0) ?? 0,
+    };
+  }
+
+  if (shape.type === 'image') {
+    const imageUrl = await safeExportPng(shape, 1);
+    return {
+      ...base,
+      type: 'image',
+      imageUrl,
+      fill: fillColor,
+      fillOpacity,
+    };
+  }
+
+  if (shape.type === 'path' || shape.type === 'svg-raw') {
+    const imageUrl = await safeExportPng(shape, 1);
+    return {
+      ...base,
+      type: 'path',
+      imageUrl,
+      fill: fillColor,
+      fillOpacity,
+      strokeColor,
+      strokeWidth,
+    };
+  }
+
+  // Unknown shape type — take a visual snapshot so nothing silently disappears.
+  const imageUrl = await safeExportPng(shape, 1);
+  return {
+    ...base,
+    type: 'path',
+    imageUrl,
+    fill: fillColor,
+    fillOpacity,
+  };
+}
+
+function detectComponentInstance(
+  shape: AnyShape
+): { libraryId?: string; componentId?: string; name?: string } | null {
+  try {
+    const anyShape = shape as unknown as {
+      component?: { libraryId?: string; id?: string; name?: string };
+      mainComponent?: { libraryId?: string; id?: string; name?: string };
+      isComponentInstance?: boolean;
+      componentId?: string;
+      libraryId?: string;
+      componentRefId?: string;
+    };
+    const linked = anyShape.component ?? anyShape.mainComponent;
+    if (linked && (linked.id || linked.libraryId)) {
+      return {
+        libraryId: linked.libraryId,
+        componentId: linked.id,
+        name: linked.name ?? safeName(shape),
+      };
+    }
+    if (anyShape.isComponentInstance && anyShape.componentId) {
+      return {
+        libraryId: anyShape.libraryId,
+        componentId: anyShape.componentId,
+        name: safeName(shape),
+      };
+    }
+  } catch {
+    // Some Penpot shapes expose these as getters that throw when not
+    // "mounted" (e.g. on library main instances). Treat as not-an-instance.
+  }
+  return null;
+}
+
+function safeName(shape: AnyShape): string | undefined {
+  try {
+    return shape.name ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function safeExportPng(shape: AnyShape, scale: number): Promise<string | undefined> {
+  try {
+    if (!('export' in shape) || typeof (shape as { export?: unknown }).export !== 'function') {
+      return undefined;
+    }
+    const bytes = await (
+      shape as unknown as {
+        export: (opts: { type: 'png'; scale: number }) => Promise<Uint8Array>;
+      }
+    ).export({ type: 'png', scale });
+    return `data:image/png;base64,${uint8ArrayToBase64(bytes)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function readChildren(shape: unknown): AnyShape[] {
+  if (!shape || typeof shape !== 'object') return [];
+  try {
+    const c = (shape as { children?: unknown }).children;
+    if (!c) return [];
+    if (Array.isArray(c)) return c as AnyShape[];
+    // Some implementations expose `children` as an iterable / live list.
+    try {
+      return Array.from(c as Iterable<AnyShape>);
+    } catch {
+      return [];
+    }
+  } catch {
+    // Accessing `.children` may throw on certain shapes; treat as no children.
+    return [];
+  }
+}
+
+function readBackground(shape: unknown): string | null {
+  if (!shape || typeof shape !== 'object') return null;
+  try {
+    const fills = (shape as { fills?: unknown }).fills;
+    if (Array.isArray(fills) && fills.length > 0) {
+      const fill = fills[0] as { fillColor?: string };
+      if (fill && typeof fill.fillColor === 'string') return fill.fillColor;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 // ─── Canvas Insertion ─────────────────────────────────────────────────────────
 
 function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
@@ -154,8 +654,13 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
       const slide = slides[i];
       const slideName = `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
 
-      if (slide.source === 'library-component' && slide.libraryId && slide.componentId) {
-        // Insert component instance as slide
+      if (
+        slide.source === 'library-component' &&
+        slide.libraryId &&
+        slide.componentId &&
+        slide.nodes.length === 0
+      ) {
+        // Library-linked slide without imported nodes: insert as a component instance
         const board = createBoardForSlide(slide, xOffset, yBase, slideName);
         try {
           const allLibs = [penpot.library.local, ...penpot.library.connected];
@@ -172,19 +677,16 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
         }
         insertedBoards.push(board);
       } else {
-        // Build slide from our internal nodes
         const board = createBoardForSlide(slide, xOffset, yBase, slideName);
-        populateBoardWithNodes(board, slide);
+        populateBoardWithNodes(board, slide.nodes, 0, 0);
         insertedBoards.push(board);
       }
 
       xOffset += slide.width + settings.spacing;
     }
 
-    // Optionally group all boards into a section
     if (settings.groupIntoSection && insertedBoards.length > 0) {
       try {
-        // Select all inserted boards
         penpot.selection = insertedBoards;
       } catch {
         // Selection may not be available in all contexts
@@ -211,7 +713,6 @@ function createBoardForSlide(
   board.resize(slide.width, slide.height);
   board.clipContent = true;
 
-  // Background fill - Fill interface uses fillColor/fillOpacity directly (no fillType)
   board.fills = [
     {
       fillColor: slide.background,
@@ -222,38 +723,52 @@ function createBoardForSlide(
   return board;
 }
 
+// Recursive board populator. Group nodes accumulate their offset so children
+// land at the correct absolute slide coordinates.
 function populateBoardWithNodes(
   board: ReturnType<typeof penpot.createBoard>,
-  slide: Slide
+  nodes: SlideNode[],
+  offsetX: number,
+  offsetY: number
 ) {
-  // Process in reverse order so visually "top" layers are actually on top in penpot
-  for (const node of slide.nodes) {
+  for (const node of nodes) {
     if (!node.visible) continue;
 
+    const absX = offsetX + node.x;
+    const absY = offsetY + node.y;
+
     try {
+      if (node.type === 'group') {
+        populateBoardWithNodes(board, node.children ?? [], absX, absY);
+        continue;
+      }
+
       if (node.type === 'text') {
         const text = penpot.createText(node.text ?? '');
         if (text) {
           text.name = node.name;
-          text.x = node.x;
-          text.y = node.y;
+          text.x = absX;
+          text.y = absY;
           text.resize(node.width, node.height);
           text.opacity = node.opacity;
           text.rotation = node.rotation;
           board.appendChild(text);
         }
-      } else if (node.type === 'rect') {
+        continue;
+      }
+
+      if (node.type === 'rect' || node.type === 'image' || node.type === 'path') {
         const rect = penpot.createRectangle();
         rect.name = node.name;
-        rect.x = node.x;
-        rect.y = node.y;
+        rect.x = absX;
+        rect.y = absY;
         rect.resize(node.width, node.height);
         rect.opacity = node.opacity;
         rect.rotation = node.rotation;
 
         rect.fills = [
           {
-            fillColor: node.fill ?? '#ffffff',
+            fillColor: node.fill ?? '#d0d0d0',
             fillOpacity: node.fillOpacity ?? 1,
           },
         ];
@@ -275,11 +790,14 @@ function populateBoardWithNodes(
         }
 
         board.appendChild(rect);
-      } else if (node.type === 'ellipse') {
+        continue;
+      }
+
+      if (node.type === 'ellipse') {
         const ellipse = penpot.createEllipse();
         ellipse.name = node.name;
-        ellipse.x = node.x;
-        ellipse.y = node.y;
+        ellipse.x = absX;
+        ellipse.y = absY;
         ellipse.resize(node.width, node.height);
         ellipse.opacity = node.opacity;
         ellipse.rotation = node.rotation;
@@ -304,18 +822,22 @@ function populateBoardWithNodes(
         }
 
         board.appendChild(ellipse);
-      } else if (node.type === 'component-instance') {
+        continue;
+      }
+
+      if (node.type === 'component-instance') {
         const allLibs = [penpot.library.local, ...penpot.library.connected];
         const lib = allLibs.find((l) => l.id === node.libraryId);
         const comp = lib?.components.find((c) => c.id === node.componentId);
         if (comp) {
           const instance = comp.instance();
           instance.name = node.name;
-          instance.x = node.x;
-          instance.y = node.y;
+          instance.x = absX;
+          instance.y = absY;
           instance.resize(node.width, node.height);
           board.appendChild(instance);
         }
+        continue;
       }
     } catch {
       // Skip nodes that fail to create
