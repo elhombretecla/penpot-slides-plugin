@@ -140,16 +140,13 @@ html, body, #root, .app-root {
   margin-bottom: 2px;
 }
 
-.home-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.home-section-label {
   margin-bottom: var(--spacing-12);
-}
-
-.home-section-subtitle {
-  margin-top: var(--spacing-16);
-  margin-bottom: var(--spacing-8);
+  color: var(--foreground-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
 }
 
 .home-loading {
@@ -222,64 +219,6 @@ html, body, #root, .app-root {
   color: var(--foreground-secondary);
 }
 
-/* Recent sessions */
-.recent-sessions {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--spacing-12);
-}
-
-.session-card {
-  display: flex;
-  flex-direction: column;
-  background: var(--background-tertiary);
-  border: 1px solid var(--background-quaternary);
-  border-radius: var(--spacing-8);
-  overflow: hidden;
-  cursor: pointer;
-  text-align: left;
-  transition: transform 0.12s;
-}
-.session-card:hover { transform: translateY(-2px); }
-
-.session-thumbnail {
-  position: relative;
-  height: 80px;
-  background: var(--background-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent-primary);
-}
-
-.session-age {
-  position: absolute;
-  top: 6px;
-  left: 8px;
-  background: var(--background-secondary);
-  color: var(--foreground-secondary);
-  font-size: var(--font-size-xs);
-  padding: 2px 6px;
-  border-radius: 10px;
-}
-
-.session-info {
-  padding: var(--spacing-8) var(--spacing-8);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.session-name {
-  font-size: var(--font-size-s);
-  font-weight: var(--font-weight-bold);
-  color: var(--foreground-primary);
-}
-
-.session-slides {
-  font-size: var(--font-size-xs);
-  color: var(--foreground-secondary);
-}
 
 /* ─── LIBRARY PICKER ─────────────────────────────────────────────────────── */
 

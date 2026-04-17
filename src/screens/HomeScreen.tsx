@@ -2,11 +2,6 @@ import { useEffect } from 'react';
 import { useSlideStore } from '../store';
 import { penpotApi } from '../api';
 
-const RECENT_SESSIONS = [
-  { id: '1', name: 'Q3 Marketing Deck', slides: 12, ago: '2 days ago' },
-  { id: '2', name: 'Product Launch V2', slides: 8, ago: 'Yesterday' },
-];
-
 export default function HomeScreen() {
   const setScreen = useSlideStore((s) => s.setScreen);
   const libraries = useSlideStore((s) => s.libraries);
@@ -42,11 +37,9 @@ export default function HomeScreen() {
       </div>
 
       <div className="home-body">
-        {/* Left column */}
+        {/* Left column – actions */}
         <div className="home-left">
-          <p className="headline-s" style={{ color: 'var(--foreground-primary)', marginBottom: 'var(--spacing-4)' }}>
-            Get Started
-          </p>
+          <p className="headline-s home-section-label">Get Started</p>
 
           <button
             data-appearance="primary"
@@ -71,9 +64,11 @@ export default function HomeScreen() {
             </svg>
             Import from Library
           </button>
+        </div>
 
-          {/* Connected Libraries */}
-          <p className="headline-s home-section-subtitle">Connected Libraries</p>
+        {/* Right column – Connected Libraries */}
+        <div className="home-right">
+          <p className="headline-s home-section-label">Connected Libraries</p>
 
           {librariesLoading ? (
             <div className="home-loading">
@@ -119,38 +114,6 @@ export default function HomeScreen() {
               ))}
             </div>
           )}
-        </div>
-
-        {/* Right column – Recent */}
-        <div className="home-right">
-          <div className="home-section-header">
-            <p className="headline-s" style={{ color: 'var(--foreground-primary)' }}>Recent Sessions</p>
-            <button className="btn-link">View All</button>
-          </div>
-
-          <div className="recent-sessions">
-            {RECENT_SESSIONS.map((session) => (
-              <button
-                key={session.id}
-                className="session-card"
-                onClick={() => setScreen('slide-manager')}
-              >
-                <div className="session-thumbnail">
-                  <div className="session-thumbnail-bg">
-                    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" opacity="0.3">
-                      <rect x="2" y="4" width="20" height="14" rx="2" fill="currentColor"/>
-                      <path d="M7 8h10M7 12h7" stroke="var(--background-secondary)" strokeWidth="1.5" strokeLinecap="round"/>
-                    </svg>
-                  </div>
-                  <span className="session-age body-xs">{session.ago}</span>
-                </div>
-                <div className="session-info">
-                  <span className="session-name">{session.name}</span>
-                  <span className="session-slides">{session.slides} Slides</span>
-                </div>
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     </div>
