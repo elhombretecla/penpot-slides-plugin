@@ -1,8 +1,10 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 import livePreview from "vite-live-preview";
 
 export default defineConfig({
   plugins: [
+    react(),
     livePreview({
       reload: true,
       config: {

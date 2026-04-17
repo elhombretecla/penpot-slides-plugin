@@ -1,6 +1,6 @@
 {
-  "name": "Penpot starter plugin",
+  "name": "Slide Builder",
   "code": "plugin.js",
-  "description": "This is a starter plugin for Penpot",
-  "permissions": ["content:read", "content:write"]
+  "description": "Create, edit, and export presentation slides directly into the Penpot canvas",
+  "permissions": ["content:read", "content:write", "allow:downloads"]
 }

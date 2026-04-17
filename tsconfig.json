@@ -10,6 +10,7 @@
       "./node_modules/@penpot"
     ],
     "types": ["plugin-types"],
+    "jsx": "react-jsx",
     /* Bundler mode */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
