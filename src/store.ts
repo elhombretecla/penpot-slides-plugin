@@ -31,6 +31,12 @@ interface SlideStore {
   componentsLoading: boolean;
   setComponentsLoading: (v: boolean) => void;
 
+  thumbnailsMap: Record<string, string>; // componentId → base64 data URL
+  thumbnailsPending: Set<string>;        // componentIds still being exported
+  setThumbnail: (componentId: string, thumbnail: string) => void;
+  setPendingThumbnails: (ids: string[]) => void;
+  clearThumbnails: () => void;
+
   selectedComponentIds: Set<string>;
   toggleComponentSelection: (componentId: string, libraryId: string) => void;
   clearComponentSelection: () => void;
@@ -74,13 +80,11 @@ interface SlideStore {
   showExportPanel: boolean;
   setShowExportPanel: (v: boolean) => void;
 
-  // ── Search/Filter (Library Picker) ─────────────────────────────────────────
+  // ── Search (Library Picker) ────────────────────────────────────────────────
   searchQuery: string;
   setSearchQuery: (q: string) => void;
   activeLibraryId: string | null;
   setActiveLibraryId: (id: string | null) => void;
-  activeFilter: string;
-  setActiveFilter: (f: string) => void;
 }
 
 export const useSlideStore = create<SlideStore>((set, get) => ({
@@ -105,6 +109,20 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     })),
   componentsLoading: false,
   setComponentsLoading: (componentsLoading) => set({ componentsLoading }),
+
+  thumbnailsMap: {},
+  thumbnailsPending: new Set(),
+  setThumbnail: (componentId, thumbnail) =>
+    set((state) => {
+      const next = new Set(state.thumbnailsPending);
+      next.delete(componentId);
+      return {
+        thumbnailsMap: { ...state.thumbnailsMap, [componentId]: thumbnail },
+        thumbnailsPending: next,
+      };
+    }),
+  setPendingThumbnails: (ids) => set({ thumbnailsPending: new Set(ids) }),
+  clearThumbnails: () => set({ thumbnailsMap: {}, thumbnailsPending: new Set() }),
 
   selectedComponentIds: new Set(),
   selectedComponentLibraryMap: {},
@@ -251,11 +269,9 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   showExportPanel: false,
   setShowExportPanel: (showExportPanel) => set({ showExportPanel }),
 
-  // ── Search/Filter ──────────────────────────────────────────────────────────
+  // ── Search ─────────────────────────────────────────────────────────────────
   searchQuery: '',
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   activeLibraryId: null,
   setActiveLibraryId: (activeLibraryId) => set({ activeLibraryId }),
-  activeFilter: 'All Slides',
-  setActiveFilter: (activeFilter) => set({ activeFilter }),
 }));

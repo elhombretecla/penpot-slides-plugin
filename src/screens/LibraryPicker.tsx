@@ -6,8 +6,6 @@ import { isSlideLike, getFilteredComponents } from '../utils';
 import type { Slide, ComponentInfo } from '../types';
 import { SLIDE_SIZE_PRESETS } from '../types';
 
-const FILTERS = ['All Slides', 'Title Slides', 'Content & Features', 'Charts & Data'];
-
 export default function LibraryPicker() {
   const setScreen = useSlideStore((s) => s.setScreen);
   const libraries = useSlideStore((s) => s.libraries);
@@ -25,8 +23,7 @@ export default function LibraryPicker() {
   const setSearchQuery = useSlideStore((s) => s.setSearchQuery);
   const activeLibraryId = useSlideStore((s) => s.activeLibraryId);
   const setActiveLibraryId = useSlideStore((s) => s.setActiveLibraryId);
-  const activeFilter = useSlideStore((s) => s.activeFilter);
-  const setActiveFilter = useSlideStore((s) => s.setActiveFilter);
+  const clearThumbnails = useSlideStore((s) => s.clearThumbnails);
 
   useEffect(() => {
     if (libraries.length === 0) {
@@ -51,19 +48,20 @@ export default function LibraryPicker() {
   const handleLibraryChange = useCallback(
     (libraryId: string) => {
       setActiveLibraryId(libraryId);
+      clearThumbnails();
       if (!componentsMap[libraryId]) {
         setComponentsLoading(true);
         penpotApi.getComponents(libraryId);
       }
     },
-    [componentsMap, setActiveLibraryId, setComponentsLoading]
+    [componentsMap, setActiveLibraryId, setComponentsLoading, clearThumbnails]
   );
 
   const currentComponents: ComponentInfo[] = activeLibraryId
     ? (componentsMap[activeLibraryId] ?? [])
     : [];
 
-  const filteredComponents = getFilteredComponents(currentComponents, searchQuery, activeFilter);
+  const filteredComponents = getFilteredComponents(currentComponents, searchQuery);
   const grouped = groupBySection(filteredComponents);
 
   function handleAddSelected() {
@@ -137,20 +135,6 @@ export default function LibraryPicker() {
             />
           </div>
 
-          {/* Filters */}
-          <div className="picker-filters">
-            <span className="picker-filters-label">FILTERS</span>
-            {FILTERS.map((f) => (
-              <button
-                key={f}
-                className={`picker-filter-btn ${activeFilter === f ? 'active' : ''}`}
-                onClick={() => setActiveFilter(f)}
-              >
-                {f}
-              </button>
-            ))}
-          </div>
-
           {/* Add CTA */}
           {selectedComponentIds.size > 0 && (
             <button
@@ -189,9 +173,9 @@ export default function LibraryPicker() {
               <p className="body-s">No components match your search.</p>
               <button
                 className="btn-link"
-                onClick={() => { setSearchQuery(''); setActiveFilter('All Slides'); }}
+                onClick={() => setSearchQuery('')}
               >
-                Clear filters
+                Clear search
               </button>
             </div>
           ) : (
@@ -237,6 +221,8 @@ interface ComponentCardProps {
 }
 
 function ComponentCard({ component, selected, onToggle, isSuggested }: ComponentCardProps) {
+  const thumbnail = useSlideStore((s) => s.thumbnailsMap[component.id]);
+  const isPending = useSlideStore((s) => s.thumbnailsPending.has(component.id));
   const initials = component.name
     .split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
 
@@ -257,13 +243,26 @@ function ComponentCard({ component, selected, onToggle, isSuggested }: Component
         {isSuggested && !selected && (
           <span className="component-suggested" title="Looks like a slide template" />
         )}
-        <div className="component-preview-placeholder">
-          <span className="component-initials">{initials}</span>
-          <div className="component-preview-lines">
-            <div className="preview-line preview-line--wide" />
-            <div className="preview-line preview-line--narrow" />
+        {thumbnail ? (
+          <img
+            className="component-preview-img"
+            src={thumbnail}
+            alt={component.name}
+            draggable={false}
+          />
+        ) : isPending ? (
+          <div className="component-preview-loading">
+            <div className="spinner spinner--sm" />
           </div>
-        </div>
+        ) : (
+          <div className="component-preview-placeholder">
+            <span className="component-initials">{initials}</span>
+            <div className="component-preview-lines">
+              <div className="preview-line preview-line--wide" />
+              <div className="preview-line preview-line--narrow" />
+            </div>
+          </div>
+        )}
       </div>
       <span className="component-name">{component.name}</span>
     </button>

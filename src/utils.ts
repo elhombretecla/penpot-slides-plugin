@@ -216,30 +216,15 @@ export function groupComponentsByPath(
 
 export function getFilteredComponents(
   components: import('./types').ComponentInfo[],
-  query: string,
-  filter: string
+  query: string
 ): import('./types').ComponentInfo[] {
-  let result = components;
-
-  if (query.trim()) {
-    const q = query.toLowerCase();
-    result = result.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.path.toLowerCase().includes(q)
-    );
-  }
-
-  if (filter !== 'All Slides') {
-    const filterLower = filter.toLowerCase();
-    result = result.filter(
-      (c) =>
-        c.name.toLowerCase().includes(filterLower) ||
-        c.path.toLowerCase().includes(filterLower)
-    );
-  }
-
-  return result;
+  if (!query.trim()) return components;
+  const q = query.toLowerCase();
+  return components.filter(
+    (c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.path.toLowerCase().includes(q)
+  );
 }
 
 export function clamp(value: number, min: number, max: number): number {

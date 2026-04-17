@@ -24,6 +24,7 @@ html, body, #root, .app-root {
   flex-shrink: 0;
 }
 .spinner-sm { width: 13px; height: 13px; border-width: 1.5px; }
+.spinner--sm { width: 16px; height: 16px; border-width: 1.5px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -306,7 +307,6 @@ html, body, #root, .app-root {
 .picker-body { display: flex; flex: 1; overflow: hidden; }
 
 .picker-sidebar {
-  width: 186px;
   flex-shrink: 0;
   border-right: 1px solid var(--background-quaternary);
   padding: var(--spacing-12);
@@ -314,6 +314,10 @@ html, body, #root, .app-root {
   flex-direction: column;
   gap: var(--spacing-8);
   overflow-y: auto;
+}
+
+.select {
+  background-size: 16px;
 }
 
 .picker-search-wrap { position: relative; }
@@ -460,6 +464,21 @@ html, body, #root, .app-root {
   height: 7px;
   background: var(--accent-primary);
   border-radius: 50%;
+}
+
+.component-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.component-preview-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
 }
 
 .component-preview-placeholder {

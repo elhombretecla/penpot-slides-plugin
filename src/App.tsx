@@ -16,6 +16,8 @@ export default function App() {
   const setComponentsLoading = useSlideStore((s) => s.setComponentsLoading);
   const setIsInserting = useSlideStore((s) => s.setIsInserting);
   const setInsertResult = useSlideStore((s) => s.setInsertResult);
+  const setThumbnail = useSlideStore((s) => s.setThumbnail);
+  const setPendingThumbnails = useSlideStore((s) => s.setPendingThumbnails);
   const showNewSlideModal = useSlideStore((s) => s.showNewSlideModal);
 
   // Read theme from URL param on mount
@@ -52,6 +54,13 @@ export default function App() {
         case 'components':
           setComponents(data.libraryId, data.components);
           setComponentsLoading(false);
+          setPendingThumbnails(data.components.map((c) => c.id));
+          break;
+        case 'thumbnail':
+          setThumbnail(data.componentId, data.thumbnail);
+          break;
+        case 'thumbnails-complete':
+          setPendingThumbnails([]);
           break;
         case 'insert-complete':
           setIsInserting(false);
@@ -71,7 +80,7 @@ export default function App() {
 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [setTheme, setLibraries, setLibrariesLoading, setComponents, setComponentsLoading, setIsInserting, setInsertResult]);
+  }, [setTheme, setLibraries, setLibrariesLoading, setComponents, setComponentsLoading, setIsInserting, setInsertResult, setThumbnail, setPendingThumbnails]);
 
   return (
     <div className="app-root">

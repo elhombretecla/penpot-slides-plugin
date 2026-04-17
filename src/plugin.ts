@@ -69,7 +69,7 @@ function handleGetLibraries() {
   }
 }
 
-function handleGetComponents(libraryId: string) {
+async function handleGetComponents(libraryId: string) {
   try {
     const allLibs = [penpot.library.local, ...penpot.library.connected];
     const lib = allLibs.find((l) => l.id === libraryId);
@@ -79,6 +79,7 @@ function handleGetComponents(libraryId: string) {
       return;
     }
 
+    // Collect base info synchronously and send immediately so the UI can render
     const components = lib.components.map((comp) => {
       let width: number | undefined;
       let height: number | undefined;
@@ -101,11 +102,43 @@ function handleGetComponents(libraryId: string) {
       };
     });
 
+    // Send component list immediately — UI shows grid without waiting for thumbnails
     const msg: PluginMessage = { type: 'components', libraryId, components };
     penpot.ui.sendMessage(msg);
+
+    // Export thumbnails one by one (sequential avoids overwhelming the runtime)
+    // and stream each result as it completes
+    for (const comp of lib.components) {
+      try {
+        const main = comp.mainInstance();
+        if (!main) continue;
+        const bytes = await main.export({ type: 'png', scale: 0.2 });
+        const thumbnail = `data:image/png;base64,${uint8ArrayToBase64(bytes)}`;
+        const thumbMsg: PluginMessage = { type: 'thumbnail', componentId: comp.id, thumbnail };
+        penpot.ui.sendMessage(thumbMsg);
+      } catch {
+        // Skip components whose main instance can't be exported
+      }
+    }
+
+    // Signal that all thumbnail exports are done (clears pending spinners)
+    const doneMsg: PluginMessage = { type: 'thumbnails-complete' };
+    penpot.ui.sendMessage(doneMsg);
   } catch (err) {
     sendError('Failed to load components: ' + String(err));
   }
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    for (let j = 0; j < chunk.length; j++) {
+      binary += String.fromCharCode(chunk[j]);
+    }
+  }
+  return btoa(binary);
 }
 
 // ─── Canvas Insertion ─────────────────────────────────────────────────────────

@@ -108,6 +108,8 @@ export type UIMessage =
 export type PluginMessage =
   | { type: 'libraries'; libraries: LibraryInfo[] }
   | { type: 'components'; libraryId: string; components: ComponentInfo[] }
+  | { type: 'thumbnail'; componentId: string; thumbnail: string }
+  | { type: 'thumbnails-complete' }
   | { type: 'insert-complete'; count: number }
   | { type: 'error'; message: string }
   | { type: 'theme'; theme: string };
