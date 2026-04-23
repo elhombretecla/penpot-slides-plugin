@@ -32,7 +32,12 @@ export default function PropertiesPanel({ slide }: Props) {
       {!selectedNode ? (
         <SlideProperties
           slide={slide}
-          onUpdateBackground={(c) => updateSlide(slide.id, { background: c })}
+          onUpdateBackground={(c) =>
+            // Clear the fills snapshot too — otherwise `fillsToCss(slide.backgroundFills)`
+            // in SlideCanvas keeps returning the imported gradient and the
+            // new solid color is never shown (same story on export).
+            updateSlide(slide.id, { background: c, backgroundFills: undefined })
+          }
         />
       ) : (
         <NodeProperties
@@ -126,7 +131,14 @@ function NodeProperties({
 
         {(node.type === 'rect' || node.type === 'ellipse') && (
           <PropRow label="Fill">
-            <ColorInput value={node.fill ?? '#ffffff'} onChange={(v) => onUpdate({ fill: v })} />
+            <ColorInput
+              value={node.fill ?? '#ffffff'}
+              onChange={(v) =>
+                // Drop the imported fills snapshot so the flat `fill` field
+                // actually wins in the canvas render and on export.
+                onUpdate({ fill: v, fills: undefined })
+              }
+            />
           </PropRow>
         )}
 
@@ -169,7 +181,14 @@ function NodeProperties({
           </PropRow>
 
           <PropRow label="Color">
-            <ColorInput value={node.fontColor ?? '#ffffff'} onChange={(v) => onUpdate({ fontColor: v })} />
+            <ColorInput
+              value={node.fontColor ?? '#ffffff'}
+              onChange={(v) =>
+                // Text color is read from firstFillColor(node.fills) first,
+                // so clear the snapshot to let fontColor take effect.
+                onUpdate({ fontColor: v, fills: undefined })
+              }
+            />
           </PropRow>
 
           <PropRow label="Align">
