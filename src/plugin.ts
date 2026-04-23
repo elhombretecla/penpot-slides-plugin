@@ -688,16 +688,66 @@ function readFillsSnapshot(shape: unknown): unknown[] | undefined {
 
 // ─── Canvas Insertion ─────────────────────────────────────────────────────────
 
+const DECK_PADDING = 40;
+
 function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
   try {
-    let xOffset = penpot.viewport.center.x - (slides.length * (slides[0]?.width ?? 1280)) / 2;
-    const yBase = penpot.viewport.center.y - (slides[0]?.height ?? 720) / 2;
+    if (slides.length === 0) {
+      const empty: PluginMessage = { type: 'insert-complete', count: 0 };
+      penpot.ui.sendMessage(empty);
+      return;
+    }
+
+    const gap = settings.spacing;
+
+    // Pre-compute deck bounds so the wrapper centers on the viewport before
+    // flex layout takes over. Flex will then arrange the slides inside.
+    const slidesWidthSum = slides.reduce(
+      (sum, s, i) => sum + s.width + (i > 0 ? gap : 0),
+      0
+    );
+    const maxSlideHeight = Math.max(...slides.map((s) => s.height));
+    const deckWidth = slidesWidthSum + DECK_PADDING * 2;
+    const deckHeight = maxSlideHeight + DECK_PADDING * 2;
+
+    const deck = penpot.createBoard();
+    deck.name = 'Slides deck';
+    deck.x = penpot.viewport.center.x - deckWidth / 2;
+    deck.y = penpot.viewport.center.y - deckHeight / 2;
+    deck.resize(deckWidth, deckHeight);
+    // Transparent wrapper — the deck is a layout container, not a visual slide.
+    deck.fills = [];
+
+    const flex = deck.addFlexLayout();
+    flex.dir = 'row';
+    flex.wrap = 'nowrap';
+    flex.alignItems = 'start';
+    flex.justifyContent = 'start';
+    flex.topPadding = DECK_PADDING;
+    flex.rightPadding = DECK_PADDING;
+    flex.bottomPadding = DECK_PADDING;
+    flex.leftPadding = DECK_PADDING;
+    flex.rowGap = gap;
+    flex.columnGap = gap;
 
     const insertedBoards: ReturnType<typeof penpot.createBoard>[] = [];
 
     for (let i = 0; i < slides.length; i++) {
       const slide = slides[i];
       const slideName = `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
+
+      // Placeholder x/y — flex layout assigns the real position when the
+      // board is appended to the deck below.
+      const board = createBoardForSlide(slide, 0, 0, slideName);
+      deck.appendChild(board);
+
+      // Keep each slide at its configured size; without this flex could try
+      // to grow/shrink boards to fit the container.
+      const layoutChild = (board as { layoutChild?: { horizontalSizing: 'auto' | 'fill' | 'fix'; verticalSizing: 'auto' | 'fill' | 'fix' } }).layoutChild;
+      if (layoutChild) {
+        layoutChild.horizontalSizing = 'fix';
+        layoutChild.verticalSizing = 'fix';
+      }
 
       if (
         slide.source === 'library-component' &&
@@ -706,15 +756,14 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
         slide.nodes.length === 0
       ) {
         // Library-linked slide without imported nodes: insert as a component instance
-        const board = createBoardForSlide(slide, xOffset, yBase, slideName);
         try {
           const allLibs = [penpot.library.local, ...penpot.library.connected];
           const lib = allLibs.find((l) => l.id === slide.libraryId);
           const comp = lib?.components.find((c) => c.id === slide.componentId);
           if (comp) {
             const instance = comp.instance();
-            // Penpot shape coordinates are absolute in the canvas, so we
-            // position the instance at the board's absolute origin.
+            // Penpot shape coordinates are absolute in the canvas; use the
+            // board's post-flex absolute position as the instance origin.
             instance.x = board.x;
             instance.y = board.y;
             board.appendChild(instance);
@@ -722,22 +771,19 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
         } catch {
           // If component instantiation fails, leave the board empty
         }
-        insertedBoards.push(board);
       } else {
-        const board = createBoardForSlide(slide, xOffset, yBase, slideName);
-        // SlideNode coordinates are relative to the slide origin; Penpot shape
-        // coordinates are absolute in the canvas — offset by the board's
+        // SlideNode coordinates are slide-relative; Penpot shape coordinates
+        // are absolute in the canvas — offset by the board's (flex-assigned)
         // absolute position so children land inside the board.
         populateBoardWithNodes(board, slide.nodes, board.x, board.y);
-        insertedBoards.push(board);
       }
 
-      xOffset += slide.width + settings.spacing;
+      insertedBoards.push(board);
     }
 
-    if (settings.groupIntoSection && insertedBoards.length > 0) {
+    if (settings.groupIntoSection) {
       try {
-        penpot.selection = insertedBoards;
+        penpot.selection = [deck];
       } catch {
         // Selection may not be available in all contexts
       }
