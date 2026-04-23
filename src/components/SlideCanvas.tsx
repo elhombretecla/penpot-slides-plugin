@@ -42,6 +42,7 @@ export default function SlideCanvas({ slide }: Props) {
   const setSelectedNodes = useSlideStore((s) => s.setSelectedNodes);
   const addNode = useSlideStore((s) => s.addNode);
   const updateNode = useSlideStore((s) => s.updateNode);
+  const deleteNode = useSlideStore((s) => s.deleteNode);
   const commitHistory = useSlideStore((s) => s.commitHistory);
   const undo = useSlideStore((s) => s.undo);
   const redo = useSlideStore((s) => s.redo);
@@ -93,6 +94,29 @@ export default function SlideCanvas({ slide }: Props) {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [undo, redo, zoomIn, zoomOut, zoomReset]);
+
+  // Backspace / Delete removes every node in the current selection. Guarded
+  // against input-like focus so typing into text fields (including the inline
+  // text editor) still routes normally. Collapses into one history entry.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      const editable = t?.isContentEditable;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
+      if (editingNodeId) return;
+      if (!slide || selectedNodeIds.length === 0) return;
+      e.preventDefault();
+      commitHistory();
+      const slideId = slide.id;
+      for (const id of selectedNodeIds) deleteNode(slideId, id);
+      setSelectedNodes([]);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [slide, selectedNodeIds, editingNodeId, commitHistory, deleteNode, setSelectedNodes]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
