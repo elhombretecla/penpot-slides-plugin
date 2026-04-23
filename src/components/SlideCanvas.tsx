@@ -29,6 +29,35 @@ export default function SlideCanvas({ slide }: Props) {
   const setSelectedNodes = useSlideStore((s) => s.setSelectedNodes);
   const addNode = useSlideStore((s) => s.addNode);
   const updateNode = useSlideStore((s) => s.updateNode);
+  const commitHistory = useSlideStore((s) => s.commitHistory);
+  const undo = useSlideStore((s) => s.undo);
+  const redo = useSlideStore((s) => s.redo);
+  const canUndo = useSlideStore((s) => s.history.past.length > 0);
+  const canRedo = useSlideStore((s) => s.history.future.length > 0);
+
+  // Global keyboard shortcuts for undo/redo. Ignore when focus is inside an
+  // input-like element so typing into the text editor or sidebar fields still
+  // routes characters normally.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      const editable = t?.isContentEditable;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [undo, redo]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   // Canvas-level drag covers two modes: 'draw' (creating a shape with the
@@ -176,6 +205,7 @@ export default function SlideCanvas({ slide }: Props) {
     } else {
       node = makeTextNode(x, y, Math.max(w, 120), Math.max(h, 40));
     }
+    commitHistory();
     addNode(slideId, node);
     selectNode(node.id);
   }
@@ -228,9 +258,18 @@ export default function SlideCanvas({ slide }: Props) {
       const startY = e.clientY;
       const slideId = slide.id;
 
+      // Snapshot slides state BEFORE the drag actually mutates anything, so an
+      // undo jumps back to the pre-drag arrangement. The many updateNode calls
+      // during the gesture collapse into this single history entry.
+      let committed = false;
+
       const onMove = (me: MouseEvent) => {
         const dx = (me.clientX - startX) / scale;
         const dy = (me.clientY - startY) / scale;
+        if (!committed && (dx !== 0 || dy !== 0)) {
+          commitHistory();
+          committed = true;
+        }
         snapshot.forEach((pos, nid) => {
           updateNode(slideId, nid, { x: pos.x + dx, y: pos.y + dy });
         });
@@ -242,13 +281,36 @@ export default function SlideCanvas({ slide }: Props) {
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     },
-    [activeTool, selectedNodeIds, setSelectedNodes, slide, scale, updateNode]
+    [activeTool, commitHistory, selectedNodeIds, setSelectedNodes, slide, scale, updateNode]
   );
 
   return (
     <div className="slide-canvas-container">
       {/* Toolbar */}
       <div className="canvas-toolbar">
+        <button
+          className="canvas-tool-btn"
+          onClick={undo}
+          disabled={!canUndo}
+          title="Undo (Ctrl+Z)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7v6h6" />
+            <path d="M21 17a9 9 0 0 0-15-6.7L3 13" />
+          </svg>
+        </button>
+        <button
+          className="canvas-tool-btn"
+          onClick={redo}
+          disabled={!canRedo}
+          title="Redo (Ctrl+Y)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 7v6h-6" />
+            <path d="M3 17a9 9 0 0 1 15-6.7L21 13" />
+          </svg>
+        </button>
+        <div className="toolbar-divider" />
         <ToolButton tool="select" active={activeTool === 'select'} onClick={() => setActiveTool('select')}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M5 3l14 9-7 1-4 7L5 3z"/>
@@ -332,12 +394,16 @@ export default function SlideCanvas({ slide }: Props) {
                 editingNodeId={editingNodeId}
                 onNodeMouseDown={handleNodeMouseDown}
                 onStartEditing={(id) => {
+                  // Each edit session (between double-click and blur) is one
+                  // undoable step regardless of how many keystrokes happen.
+                  commitHistory();
                   setEditingNodeId(id);
                   selectNode(id);
                 }}
                 onStopEditing={() => setEditingNodeId(null)}
                 onTextChange={(id, text) => updateNode(slide.id, id, { text })}
                 onResize={(id, patch) => updateNode(slide.id, id, patch)}
+                onCommitHistory={commitHistory}
               />
             ))
           )}
@@ -377,6 +443,7 @@ interface CanvasNodeProps {
   onStopEditing: () => void;
   onTextChange: (id: string, text: string) => void;
   onResize: (id: string, patch: Partial<SlideNode>) => void;
+  onCommitHistory: () => void;
 }
 
 function CanvasNode({
@@ -391,6 +458,7 @@ function CanvasNode({
   onStopEditing,
   onTextChange,
   onResize,
+  onCommitHistory,
 }: CanvasNodeProps) {
   const isSelected = selectedNodeIds.includes(node.id);
   const isEditing = editingNodeId === node.id;
@@ -470,11 +538,17 @@ function CanvasNode({
               onStopEditing={onStopEditing}
               onTextChange={onTextChange}
               onResize={onResize}
+              onCommitHistory={onCommitHistory}
             />
           ))}
         </div>
         {isSelected && !isEditing && activeTool === 'select' && (
-          <ResizeHandles node={node} scale={scale} onResize={(patch) => onResize(node.id, patch)} />
+          <ResizeHandles
+            node={node}
+            scale={scale}
+            onResize={(patch) => onResize(node.id, patch)}
+            onCommit={onCommitHistory}
+          />
         )}
       </div>
     );
@@ -646,7 +720,12 @@ function CanvasNode({
     >
       {content}
       {isSelected && !isEditing && activeTool === 'select' && (
-        <ResizeHandles node={node} scale={scale} onResize={(patch) => onResize(node.id, patch)} />
+        <ResizeHandles
+          node={node}
+          scale={scale}
+          onResize={(patch) => onResize(node.id, patch)}
+          onCommit={onCommitHistory}
+        />
       )}
     </div>
   );
@@ -677,9 +756,10 @@ interface ResizeHandlesProps {
   node: SlideNode;
   scale: number;
   onResize: (patch: Partial<SlideNode>) => void;
+  onCommit: () => void;
 }
 
-function ResizeHandles({ node, scale, onResize }: ResizeHandlesProps) {
+function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) {
   const startResize = useCallback(
     (dir: HandleDir, e: React.MouseEvent) => {
       e.stopPropagation();
@@ -697,9 +777,17 @@ function ResizeHandles({ node, scale, onResize }: ResizeHandlesProps) {
       const prevBodyCursor = document.body.style.cursor;
       document.body.style.cursor = CURSOR[dir];
 
+      // Commit history once, on the first real movement — a mousedown-mouseup
+      // without drag shouldn't produce an undo entry.
+      let committed = false;
+
       const onMove = (me: MouseEvent) => {
         const dx = (me.clientX - startMouseX) / scale;
         const dy = (me.clientY - startMouseY) / scale;
+        if (!committed && (dx !== 0 || dy !== 0)) {
+          onCommit();
+          committed = true;
+        }
         let x = origX;
         let y = origY;
         let w = origW;
@@ -742,7 +830,7 @@ function ResizeHandles({ node, scale, onResize }: ResizeHandlesProps) {
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     },
-    [node.x, node.y, node.width, node.height, onResize, scale]
+    [node.x, node.y, node.width, node.height, onResize, onCommit, scale]
   );
 
   const size = 8;

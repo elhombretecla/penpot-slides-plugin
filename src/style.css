@@ -729,8 +729,9 @@ html, body, #root, .app-root {
   transition: background 0.12s, color 0.12s;
   font-family: inherit;
 }
-.canvas-tool-btn:hover { background: var(--background-quaternary); color: var(--foreground-primary); }
+.canvas-tool-btn:hover:not(:disabled) { background: var(--background-quaternary); color: var(--foreground-primary); }
 .canvas-tool-btn.active { background: var(--accent-primary); color: var(--background-secondary); }
+.canvas-tool-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .toolbar-divider {
   width: 1px;

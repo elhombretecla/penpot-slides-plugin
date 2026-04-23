@@ -165,6 +165,15 @@ interface SlideStore {
   sidePanel: SidePanel;
   setSidePanel: (panel: SidePanel) => void;
 
+  // ── History (undo / redo) ──────────────────────────────────────────────────
+  // Each entry is a snapshot of the `slides` array. Slide updates are always
+  // immutable (spread / map), so shallow snapshots are safe — the referenced
+  // slide objects cannot be mutated after capture.
+  history: { past: Slide[][]; future: Slide[][] };
+  commitHistory: () => void;
+  undo: () => void;
+  redo: () => void;
+
   setSlides: (slides: Slide[]) => void;
   addSlide: (slide: Slide) => void;
   addSlides: (slides: Slide[]) => void;
@@ -337,6 +346,53 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   selectedNodeIds: [],
   sidePanel: 'properties',
   setSidePanel: (sidePanel) => set({ sidePanel }),
+
+  history: { past: [], future: [] },
+  commitHistory: () =>
+    set((state) => ({
+      history: {
+        // Cap at 50 to bound memory — oldest entries are dropped first.
+        past: [...state.history.past.slice(-49), state.slides],
+        future: [],
+      },
+    })),
+  undo: () =>
+    set((state) => {
+      const { past, future } = state.history;
+      if (past.length === 0) return {};
+      const prev = past[past.length - 1];
+      // `activeSlideId` may point at a slide that didn't exist yet at the
+      // snapshot time (or that was deleted since) — fall back to the first
+      // slide when the current id is not present.
+      const activeStillExists = prev.some((s) => s.id === state.activeSlideId);
+      return {
+        slides: prev,
+        activeSlideId: activeStillExists ? state.activeSlideId : prev[0]?.id ?? null,
+        // Selection refers to node ids that may no longer exist in `prev`;
+        // clearing avoids dangling references that would confuse the canvas.
+        selectedNodeIds: [],
+        history: {
+          past: past.slice(0, -1),
+          future: [state.slides, ...future],
+        },
+      };
+    }),
+  redo: () =>
+    set((state) => {
+      const { past, future } = state.history;
+      if (future.length === 0) return {};
+      const next = future[0];
+      const activeStillExists = next.some((s) => s.id === state.activeSlideId);
+      return {
+        slides: next,
+        activeSlideId: activeStillExists ? state.activeSlideId : next[0]?.id ?? null,
+        selectedNodeIds: [],
+        history: {
+          past: [...past, state.slides],
+          future: future.slice(1),
+        },
+      };
+    }),
 
   setSlides: (slides) => set({ slides }),
   addSlide: (slide) =>
