@@ -298,9 +298,12 @@ function CanvasNode({
 
       const handleMouseMove = (moveEvent: MouseEvent) => {
         if (!dragStart.current) return;
+        // dx/dy are cumulative from the mousedown origin, not per-frame deltas.
+        // The parent applies `node.x + dx` where `node` is the snapshot at
+        // mousedown, so a per-frame delta would snap back to the origin each
+        // frame instead of moving the element.
         const dx = moveEvent.clientX - dragStart.current.mouseX;
         const dy = moveEvent.clientY - dragStart.current.mouseY;
-        dragStart.current = { mouseX: moveEvent.clientX, mouseY: moveEvent.clientY };
         onDrag(node.id, dx, dy, node);
       };
 
