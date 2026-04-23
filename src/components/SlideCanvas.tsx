@@ -1,7 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide, SlideNode } from '../types';
-import { makeRectNode, makeEllipseNode, makeTextNode, fillsToCss, firstFillColor } from '../utils';
+import {
+  makeRectNode,
+  makeEllipseNode,
+  makeTextNode,
+  fillsToCss,
+  firstFillColor,
+  findNodeById,
+} from '../utils';
 
 interface Props {
   slide: Slide | null;
@@ -19,12 +26,20 @@ export default function SlideCanvas({ slide }: Props) {
 
   const selectedNodeIds = useSlideStore((s) => s.selectedNodeIds);
   const selectNode = useSlideStore((s) => s.selectNode);
+  const setSelectedNodes = useSlideStore((s) => s.setSelectedNodes);
   const addNode = useSlideStore((s) => s.addNode);
   const updateNode = useSlideStore((s) => s.updateNode);
 
   const canvasRef = useRef<HTMLDivElement>(null);
-  const drawingRef = useRef<{ startX: number; startY: number } | null>(null);
-  const [drawingRect, setDrawingRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // Canvas-level drag covers two modes: 'draw' (creating a shape with the
+  // rect/ellipse/text tools) and 'marquee' (rubber-band selection with the
+  // select tool over empty canvas). `shiftKey` is captured at mousedown for
+  // marquee additive selection.
+  const canvasDragRef = useRef<
+    | { startX: number; startY: number; mode: 'draw' | 'marquee'; shiftKey: boolean }
+    | null
+  >(null);
+  const [canvasDragRect, setCanvasDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   if (!slide) {
     return (
@@ -46,67 +61,110 @@ export default function SlideCanvas({ slide }: Props) {
 
   const handleCanvasMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (activeTool === 'select') {
-        if (e.target === canvasRef.current || (e.target as HTMLElement).classList.contains('canvas-bg')) {
-          selectNode(null);
-          setEditingNodeId(null);
-        }
-        return;
-      }
-
       if (!canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      drawingRef.current = { startX: x, startY: y };
-      setDrawingRect({ x, y, w: 0, h: 0 });
+
+      if (activeTool === 'select') {
+        const onEmpty =
+          e.target === canvasRef.current ||
+          (e.target as HTMLElement).classList.contains('canvas-bg');
+        if (!onEmpty) return;
+        setEditingNodeId(null);
+        // Shift preserves the current selection so the marquee can add to it;
+        // without shift the selection resets now so intermediate marquee sizes
+        // give immediate feedback.
+        if (!e.shiftKey) selectNode(null);
+        canvasDragRef.current = { startX: x, startY: y, mode: 'marquee', shiftKey: e.shiftKey };
+        setCanvasDragRect({ x, y, w: 0, h: 0 });
+        return;
+      }
+
+      canvasDragRef.current = { startX: x, startY: y, mode: 'draw', shiftKey: false };
+      setCanvasDragRect({ x, y, w: 0, h: 0 });
     },
     [activeTool, selectNode]
   );
 
-  const handleCanvasMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!drawingRef.current || activeTool === 'select') return;
-      if (!canvasRef.current) return;
-      const rect = canvasRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      const { startX, startY } = drawingRef.current;
-      setDrawingRect({
-        x: Math.min(x, startX),
-        y: Math.min(y, startY),
-        w: Math.abs(x - startX),
-        h: Math.abs(y - startY),
-      });
-    },
-    [activeTool]
-  );
+  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canvasDragRef.current || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const { startX, startY } = canvasDragRef.current;
+    setCanvasDragRect({
+      x: Math.min(x, startX),
+      y: Math.min(y, startY),
+      w: Math.abs(x - startX),
+      h: Math.abs(y - startY),
+    });
+  }, []);
 
   const handleCanvasMouseUp = useCallback(
     (_e: React.MouseEvent<HTMLDivElement>) => {
-      if (!drawingRef.current || !drawingRect) return;
-      drawingRef.current = null;
+      const drag = canvasDragRef.current;
+      if (!drag || !canvasDragRect) return;
+      canvasDragRef.current = null;
 
       const slideId = slide?.id;
-      if (!slideId) return;
+      if (!slideId) {
+        setCanvasDragRect(null);
+        return;
+      }
 
+      if (drag.mode === 'marquee') {
+        // Convert the marquee from canvas pixels to slide coords, then hit-test
+        // every top-level node. Children of groups are treated as part of their
+        // parent — matches the "one level at a time" UX of Figma/Penpot.
+        const sx1 = canvasDragRect.x / scale;
+        const sy1 = canvasDragRect.y / scale;
+        const sx2 = (canvasDragRect.x + canvasDragRect.w) / scale;
+        const sy2 = (canvasDragRect.y + canvasDragRect.h) / scale;
+
+        const hits: string[] = [];
+        for (const n of slide?.nodes ?? []) {
+          if (!n.visible) continue;
+          const nx1 = n.x;
+          const ny1 = n.y;
+          const nx2 = n.x + n.width;
+          const ny2 = n.y + n.height;
+          const overlaps = !(nx2 < sx1 || nx1 > sx2 || ny2 < sy1 || ny1 > sy2);
+          if (overlaps) hits.push(n.id);
+        }
+
+        if (drag.shiftKey) {
+          const union = new Set([...selectedNodeIds, ...hits]);
+          setSelectedNodes(Array.from(union));
+        } else {
+          setSelectedNodes(hits);
+        }
+        setCanvasDragRect(null);
+        return;
+      }
+
+      // mode === 'draw': create a shape at the marquee bounds (or a default
+      // 200×100 if the user just clicked without dragging).
       const MIN_SIZE = 10;
-      if (drawingRect.w < MIN_SIZE || drawingRect.h < MIN_SIZE) {
-        setDrawingRect(null);
-        const { x, y } = toSlideCoords(drawingRect.x, drawingRect.y);
+      if (canvasDragRect.w < MIN_SIZE || canvasDragRect.h < MIN_SIZE) {
+        setCanvasDragRect(null);
+        const { x, y } = toSlideCoords(canvasDragRect.x, canvasDragRect.y);
         createNodeAtPos(slideId, x, y, 200, 100);
         setActiveTool('select');
         return;
       }
 
-      const { x, y } = toSlideCoords(drawingRect.x, drawingRect.y);
-      const { x: x2, y: y2 } = toSlideCoords(drawingRect.x + drawingRect.w, drawingRect.y + drawingRect.h);
+      const { x, y } = toSlideCoords(canvasDragRect.x, canvasDragRect.y);
+      const { x: x2, y: y2 } = toSlideCoords(
+        canvasDragRect.x + canvasDragRect.w,
+        canvasDragRect.y + canvasDragRect.h
+      );
       createNodeAtPos(slideId, x, y, x2 - x, y2 - y);
-      setDrawingRect(null);
+      setCanvasDragRect(null);
       setActiveTool('select');
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeTool, drawingRect, slide?.id]
+    [canvasDragRect, slide?.id, slide?.nodes, scale, selectedNodeIds, setSelectedNodes]
   );
 
   function createNodeAtPos(slideId: string, x: number, y: number, w: number, h: number) {
@@ -121,6 +179,71 @@ export default function SlideCanvas({ slide }: Props) {
     addNode(slideId, node);
     selectNode(node.id);
   }
+
+  // Unified mousedown handler for every node on the canvas. Owns both the
+  // selection update (shift-aware) and the drag gesture so multi-selection
+  // can move as a group while each selected node keeps its own origin.
+  const handleNodeMouseDown = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      if (activeTool !== 'select') return;
+      e.stopPropagation();
+      setEditingNodeId(null);
+
+      const alreadySelected = selectedNodeIds.includes(id);
+
+      // Decide the active selection for THIS gesture synchronously so the
+      // drag snapshot below captures the right set — React state updates are
+      // async, but we already know the intent from the click.
+      let nextSelection: string[];
+      if (e.shiftKey) {
+        nextSelection = alreadySelected
+          ? selectedNodeIds.filter((x) => x !== id)
+          : [...selectedNodeIds, id];
+      } else if (!alreadySelected) {
+        nextSelection = [id];
+      } else {
+        nextSelection = selectedNodeIds;
+      }
+
+      if (nextSelection !== selectedNodeIds) {
+        setSelectedNodes(nextSelection);
+      }
+
+      // After a shift-unselect or when the gesture ends up empty, there is
+      // nothing to drag.
+      if (!nextSelection.includes(id)) return;
+
+      if (!slide) return;
+      // Snapshot positions for everyone in the active selection; we anchor
+      // each to its own origin at mousedown and apply the cumulative delta
+      // every frame.
+      const snapshot = new Map<string, { x: number; y: number }>();
+      for (const nid of nextSelection) {
+        const n = findNodeById(slide.nodes, nid);
+        if (n) snapshot.set(nid, { x: n.x, y: n.y });
+      }
+      if (snapshot.size === 0) return;
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const slideId = slide.id;
+
+      const onMove = (me: MouseEvent) => {
+        const dx = (me.clientX - startX) / scale;
+        const dy = (me.clientY - startY) / scale;
+        snapshot.forEach((pos, nid) => {
+          updateNode(slideId, nid, { x: pos.x + dx, y: pos.y + dy });
+        });
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [activeTool, selectedNodeIds, setSelectedNodes, slide, scale, updateNode]
+  );
 
   return (
     <div className="slide-canvas-container">
@@ -207,38 +330,27 @@ export default function SlideCanvas({ slide }: Props) {
                 activeTool={activeTool}
                 selectedNodeIds={selectedNodeIds}
                 editingNodeId={editingNodeId}
-                onSelect={(id) => {
-                  if (activeTool === 'select') {
-                    selectNode(id);
-                    setEditingNodeId(null);
-                  }
-                }}
+                onNodeMouseDown={handleNodeMouseDown}
                 onStartEditing={(id) => {
                   setEditingNodeId(id);
                   selectNode(id);
                 }}
                 onStopEditing={() => setEditingNodeId(null)}
                 onTextChange={(id, text) => updateNode(slide.id, id, { text })}
-                onDrag={(id, dx, dy, n) => {
-                  updateNode(slide.id, id, {
-                    x: n.x + dx / scale,
-                    y: n.y + dy / scale,
-                  });
-                }}
                 onResize={(id, patch) => updateNode(slide.id, id, patch)}
               />
             ))
           )}
 
-          {/* Drawing preview rect */}
-          {drawingRect && drawingRect.w > 2 && drawingRect.h > 2 && (
+          {/* Drawing / marquee preview rect */}
+          {canvasDragRect && canvasDragRect.w > 2 && canvasDragRect.h > 2 && (
             <div
               style={{
                 position: 'absolute',
-                left: drawingRect.x,
-                top: drawingRect.y,
-                width: drawingRect.w,
-                height: drawingRect.h,
+                left: canvasDragRect.x,
+                top: canvasDragRect.y,
+                width: canvasDragRect.w,
+                height: canvasDragRect.h,
                 border: '1.5px dashed #6457f0',
                 background: 'rgba(100, 87, 240, 0.08)',
                 pointerEvents: 'none',
@@ -260,11 +372,10 @@ interface CanvasNodeProps {
   activeTool: Tool;
   selectedNodeIds: string[];
   editingNodeId: string | null;
-  onSelect: (id: string) => void;
+  onNodeMouseDown: (id: string, e: React.MouseEvent) => void;
   onStartEditing: (id: string) => void;
   onStopEditing: () => void;
   onTextChange: (id: string, text: string) => void;
-  onDrag: (id: string, dx: number, dy: number, node: SlideNode) => void;
   onResize: (id: string, patch: Partial<SlideNode>) => void;
 }
 
@@ -275,14 +386,12 @@ function CanvasNode({
   activeTool,
   selectedNodeIds,
   editingNodeId,
-  onSelect,
+  onNodeMouseDown,
   onStartEditing,
   onStopEditing,
   onTextChange,
-  onDrag,
   onResize,
 }: CanvasNodeProps) {
-  const dragStart = useRef<{ mouseX: number; mouseY: number } | null>(null);
   const isSelected = selectedNodeIds.includes(node.id);
   const isEditing = editingNodeId === node.id;
 
@@ -290,33 +399,10 @@ function CanvasNode({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (activeTool !== 'select') return;
-      e.stopPropagation();
-      onSelect(node.id);
       if (isEditing) return;
-      dragStart.current = { mouseX: e.clientX, mouseY: e.clientY };
-
-      const handleMouseMove = (moveEvent: MouseEvent) => {
-        if (!dragStart.current) return;
-        // dx/dy are cumulative from the mousedown origin, not per-frame deltas.
-        // The parent applies `node.x + dx` where `node` is the snapshot at
-        // mousedown, so a per-frame delta would snap back to the origin each
-        // frame instead of moving the element.
-        const dx = moveEvent.clientX - dragStart.current.mouseX;
-        const dy = moveEvent.clientY - dragStart.current.mouseY;
-        onDrag(node.id, dx, dy, node);
-      };
-
-      const handleMouseUp = () => {
-        dragStart.current = null;
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-      };
-
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
+      onNodeMouseDown(node.id, e);
     },
-    [activeTool, isEditing, onDrag, onSelect, node]
+    [isEditing, node.id, onNodeMouseDown]
   );
 
   const handleDoubleClick = useCallback(
@@ -379,11 +465,10 @@ function CanvasNode({
               activeTool={activeTool}
               selectedNodeIds={selectedNodeIds}
               editingNodeId={editingNodeId}
-              onSelect={onSelect}
+              onNodeMouseDown={onNodeMouseDown}
               onStartEditing={onStartEditing}
               onStopEditing={onStopEditing}
               onTextChange={onTextChange}
-              onDrag={onDrag}
               onResize={onResize}
             />
           ))}

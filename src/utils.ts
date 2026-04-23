@@ -231,6 +231,20 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+// Walk the slide tree and return the node with the given id, or null. Used by
+// the canvas to snapshot positions for multi-drag regardless of whether the
+// node lives at the top level or inside a group.
+export function findNodeById(nodes: SlideNode[], id: string): SlideNode | null {
+  for (const n of nodes) {
+    if (n.id === id) return n;
+    if (n.children) {
+      const found = findNodeById(n.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result

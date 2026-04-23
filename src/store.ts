@@ -182,6 +182,7 @@ interface SlideStore {
   setSlideNodes: (slideId: string, nodes: SlideNode[], background?: string) => void;
   selectNode: (nodeId: string | null) => void;
   addSelectedNode: (nodeId: string) => void;
+  setSelectedNodes: (ids: string[]) => void;
 
   // ── Export ─────────────────────────────────────────────────────────────────
   exportSettings: ExportSettings;
@@ -442,6 +443,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         ? state.selectedNodeIds.filter((id) => id !== nodeId)
         : [...state.selectedNodeIds, nodeId],
     })),
+  setSelectedNodes: (ids) => set({ selectedNodeIds: ids }),
 
   // ── Export ─────────────────────────────────────────────────────────────────
   exportSettings: {
