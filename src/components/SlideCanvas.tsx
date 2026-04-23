@@ -20,9 +20,22 @@ type Tool = 'select' | 'text' | 'rect' | 'ellipse';
 const CANVAS_MAX_WIDTH = 640;
 const CANVAS_MAX_HEIGHT = 400;
 
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.2;
+
+function clampZoom(z: number) {
+  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+}
+
 export default function SlideCanvas({ slide }: Props) {
   const [activeTool, setActiveTool] = useState<Tool>('select');
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  // User-controlled zoom multiplier applied on top of the fit-to-viewport
+  // scale. 1 = slide exactly fits the wrapper; larger values pan via
+  // wrapper's overflow:auto.
+  const [zoom, setZoom] = useState(1);
+  const [zoomInputValue, setZoomInputValue] = useState('100');
 
   const selectedNodeIds = useSlideStore((s) => s.selectedNodeIds);
   const selectNode = useSlideStore((s) => s.selectNode);
@@ -35,9 +48,20 @@ export default function SlideCanvas({ slide }: Props) {
   const canUndo = useSlideStore((s) => s.history.past.length > 0);
   const canRedo = useSlideStore((s) => s.history.future.length > 0);
 
-  // Global keyboard shortcuts for undo/redo. Ignore when focus is inside an
-  // input-like element so typing into the text editor or sidebar fields still
-  // routes characters normally.
+  // Keep the editable zoom input in sync whenever zoom changes from wheel /
+  // shortcut / buttons (without clobbering the user's in-progress typing —
+  // that's handled in the onChange/onBlur of the input itself).
+  useEffect(() => {
+    setZoomInputValue(String(Math.round(zoom * 100)));
+  }, [zoom]);
+
+  const zoomIn = useCallback(() => setZoom((z) => clampZoom(z * ZOOM_STEP)), []);
+  const zoomOut = useCallback(() => setZoom((z) => clampZoom(z / ZOOM_STEP)), []);
+  const zoomReset = useCallback(() => setZoom(1), []);
+
+  // Global keyboard shortcuts for undo/redo and zoom. Ignore when focus is
+  // inside an input-like element so typing into the text editor or sidebar
+  // fields still routes characters normally.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -53,13 +77,43 @@ export default function SlideCanvas({ slide }: Props) {
       } else if ((key === 'z' && e.shiftKey) || key === 'y') {
         e.preventDefault();
         redo();
+      } else if (e.key === '+' || e.key === '=') {
+        // '=' covers the common US layout where + requires shift. Either key
+        // with Ctrl/Cmd means "zoom in".
+        e.preventDefault();
+        zoomIn();
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        zoomOut();
+      } else if (e.key === '0') {
+        e.preventDefault();
+        zoomReset();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo]);
+  }, [undo, redo, zoomIn, zoomOut, zoomReset]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Ctrl/Cmd + wheel zoom. React's synthetic wheel listener is passive in
+  // modern React, which blocks preventDefault — attach a native listener with
+  // { passive: false } so the browser's built-in zoom doesn't fire instead.
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      // deltaY > 0 when scrolling down/towards user → zoom out.
+      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      setZoom((z) => clampZoom(z * factor));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   // Canvas-level drag covers two modes: 'draw' (creating a shape with the
   // rect/ellipse/text tools) and 'marquee' (rubber-band selection with the
   // select tool over empty canvas). `shiftKey` is captured at mousedown for
@@ -80,7 +134,11 @@ export default function SlideCanvas({ slide }: Props) {
 
   const scaleX = CANVAS_MAX_WIDTH / slide.width;
   const scaleY = CANVAS_MAX_HEIGHT / slide.height;
-  const scale = Math.min(scaleX, scaleY, 1);
+  const fitScale = Math.min(scaleX, scaleY, 1);
+  // Final scale combines fit-to-viewport with the user zoom; all internal
+  // drag/resize math divides by this, so coordinate conversions stay correct
+  // at any zoom level.
+  const scale = fitScale * zoom;
   const displayW = slide.width * scale;
   const displayH = slide.height * scale;
 
@@ -348,10 +406,61 @@ export default function SlideCanvas({ slide }: Props) {
             Component
           </span>
         )}
+
+        <div className="canvas-zoom-group">
+          <button
+            className="canvas-tool-btn"
+            onClick={zoomOut}
+            disabled={zoom <= ZOOM_MIN + 1e-6}
+            title="Zoom out (Ctrl+-)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
+          <input
+            className="canvas-zoom-input"
+            type="text"
+            value={`${zoomInputValue}%`}
+            onChange={(e) => {
+              // Keep only digits while editing so the displayed "%" doesn't
+              // force the user to delete it every time.
+              setZoomInputValue(e.target.value.replace(/[^0-9]/g, ''));
+            }}
+            onBlur={() => {
+              const n = parseInt(zoomInputValue, 10);
+              if (!Number.isFinite(n) || n <= 0) {
+                setZoomInputValue(String(Math.round(zoom * 100)));
+                return;
+              }
+              setZoom(clampZoom(n / 100));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+              if (e.key === 'Escape') {
+                setZoomInputValue(String(Math.round(zoom * 100)));
+                (e.currentTarget as HTMLInputElement).blur();
+              }
+            }}
+            onDoubleClick={zoomReset}
+            title="Zoom (double-click to reset)"
+          />
+          <button
+            className="canvas-tool-btn"
+            onClick={zoomIn}
+            disabled={zoom >= ZOOM_MAX - 1e-6}
+            title="Zoom in (Ctrl++)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Canvas */}
-      <div className="canvas-wrapper">
+      <div className="canvas-wrapper" ref={wrapperRef}>
         <div
           ref={canvasRef}
           className={`canvas-slide canvas-tool-${activeTool}`}

@@ -760,10 +760,36 @@ html, body, #root, .app-root {
 .canvas-wrapper {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
   width: 100%;
-  overflow: hidden;
+  overflow: auto;
+}
+
+.canvas-zoom-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.canvas-zoom-input {
+  width: 52px;
+  height: 24px;
+  border-radius: var(--spacing-4);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--foreground-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  text-align: center;
+  padding: 0 4px;
+}
+.canvas-zoom-input:hover { background: var(--background-quaternary); color: var(--foreground-primary); }
+.canvas-zoom-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  background: var(--background-quaternary);
+  color: var(--foreground-primary);
 }
 
 .canvas-slide {
