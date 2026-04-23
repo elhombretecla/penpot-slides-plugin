@@ -279,6 +279,50 @@ export function cloneNodeWithNewIds(node: SlideNode): SlideNode {
   return copy;
 }
 
+// ─── Web font loading ─────────────────────────────────────────────────────────
+
+// Penpot stores the CSS-renderable family name (e.g. "Work Sans") on
+// `shape.fontFamily`, but the plugin iframe does not inherit the host's loaded
+// fonts. We inject Google Fonts stylesheets on demand so the canvas/thumbnail
+// previews render the actual typeface instead of falling back to sans-serif.
+const LOADED_FONT_FAMILIES = new Set<string>();
+const GENERIC_FAMILIES = new Set([
+  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded',
+  'inherit', 'initial', 'unset',
+]);
+
+export function ensureFontLoaded(family: string | undefined | null): void {
+  if (!family) return;
+  if (typeof document === 'undefined') return;
+
+  const clean = family.trim().replace(/^["']|["']$/g, '');
+  if (!clean) return;
+  if (GENERIC_FAMILIES.has(clean.toLowerCase())) return;
+  if (LOADED_FONT_FAMILIES.has(clean)) return;
+  LOADED_FONT_FAMILIES.add(clean);
+
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href =
+    `https://fonts.googleapis.com/css2?family=${encodeURIComponent(clean).replace(/%20/g, '+')}` +
+    `:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,400;1,700&display=swap`;
+  link.crossOrigin = 'anonymous';
+  document.head.appendChild(link);
+}
+
+// Return a CSS `font-family` value with safe fallbacks, and request the
+// stylesheet for the primary family as a side-effect so the browser can use
+// it as soon as it arrives. Generic families are passed through unchanged.
+export function fontFamilyCss(family: string | undefined | null): string {
+  if (!family) return 'sans-serif';
+  const clean = family.trim().replace(/^["']|["']$/g, '');
+  if (!clean) return 'sans-serif';
+  if (GENERIC_FAMILIES.has(clean.toLowerCase())) return clean;
+  ensureFontLoaded(clean);
+  return `"${clean}", sans-serif`;
+}
+
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result

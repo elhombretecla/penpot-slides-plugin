@@ -10,6 +10,7 @@ import {
   findNodeById,
   findNodeAbs,
   cloneNodeWithNewIds,
+  fontFamilyCss,
 } from '../utils';
 
 interface Props {
@@ -813,7 +814,7 @@ function CanvasNode({
             color: textColor,
             fontSize: (node.fontSize ?? 16) * scale,
             fontWeight: node.fontWeight ?? '400',
-            fontFamily: node.fontFamily ?? 'sans-serif',
+            fontFamily: fontFamilyCss(node.fontFamily),
             textAlign: node.textAlign ?? 'left',
             lineHeight: node.lineHeight ?? 1.4,
             letterSpacing: node.letterSpacing ? `${node.letterSpacing}px` : undefined,
@@ -832,7 +833,7 @@ function CanvasNode({
                 color: textColor,
                 fontSize: (node.fontSize ?? 16) * scale,
                 fontWeight: node.fontWeight ?? '400',
-                fontFamily: node.fontFamily ?? 'sans-serif',
+                fontFamily: fontFamilyCss(node.fontFamily),
                 textAlign: node.textAlign ?? 'left',
                 background: 'transparent',
                 border: '1px solid #6457f0',

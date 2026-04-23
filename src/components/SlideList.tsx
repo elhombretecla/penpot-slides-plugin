@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide } from '../types';
-import { fillsToCss, firstFillColor } from '../utils';
+import { fillsToCss, firstFillColor, fontFamilyCss } from '../utils';
 
 export default function SlideList() {
   const slides = useSlideStore((s) => s.slides);
@@ -266,7 +266,7 @@ function SlideThumbnail({ slide }: { slide: Slide }) {
                   color: firstFillColor(node.fills) ?? node.fontColor ?? '#ffffff',
                   fontSize: node.fontSize ?? 16,
                   fontWeight: node.fontWeight ?? '400',
-                  fontFamily: node.fontFamily ?? 'sans-serif',
+                  fontFamily: fontFamilyCss(node.fontFamily),
                   textAlign: node.textAlign ?? 'left',
                   lineHeight: node.lineHeight ?? 1.4,
                   letterSpacing: node.letterSpacing ? `${node.letterSpacing}px` : undefined,

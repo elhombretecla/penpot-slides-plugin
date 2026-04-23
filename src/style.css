@@ -220,7 +220,7 @@ button {
 }
 
 .library-name {
-  font-size: var(--font-size-s);
+  font-size: var(--font-size-m);
   font-weight: var(--font-weight-bold);
   white-space: nowrap;
   overflow: hidden;
@@ -229,7 +229,7 @@ button {
 }
 
 .library-meta {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-s);
   color: var(--foreground-secondary);
 }
 
