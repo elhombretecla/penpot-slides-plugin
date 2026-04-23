@@ -225,6 +225,7 @@ export default function SlideCanvas({ slide }: Props) {
                     y: n.y + dy / scale,
                   });
                 }}
+                onResize={(id, patch) => updateNode(slide.id, id, patch)}
               />
             ))
           )}
@@ -264,6 +265,7 @@ interface CanvasNodeProps {
   onStopEditing: () => void;
   onTextChange: (id: string, text: string) => void;
   onDrag: (id: string, dx: number, dy: number, node: SlideNode) => void;
+  onResize: (id: string, patch: Partial<SlideNode>) => void;
 }
 
 function CanvasNode({
@@ -278,6 +280,7 @@ function CanvasNode({
   onStopEditing,
   onTextChange,
   onDrag,
+  onResize,
 }: CanvasNodeProps) {
   const dragStart = useRef<{ mouseX: number; mouseY: number } | null>(null);
   const isSelected = selectedNodeIds.includes(node.id);
@@ -342,40 +345,49 @@ function CanvasNode({
 
   // Groups render a container and recurse into children (children are
   // positioned relative to the group, so we just render them inside).
+  // The clipping layer is a child div so the outer wrapper can host resize
+  // handles outside the clipped area.
   if (node.type === 'group') {
     const groupBg = node.clipContent
       ? fillsToCss(node.fills) ?? node.fill ?? 'transparent'
       : 'transparent';
-    const groupStyle: React.CSSProperties = {
-      ...wrapperStyle,
-      background: groupBg,
-      overflow: node.clipContent ? 'hidden' : 'visible',
-    };
-
     return (
       <div
-        style={groupStyle}
+        style={wrapperStyle}
         onMouseDown={handleMouseDown}
         onDoubleClick={handleDoubleClick}
         data-node-id={node.id}
         data-node-type="group"
       >
-        {node.children?.map((child) => (
-          <CanvasNode
-            key={child.id}
-            node={child}
-            scale={scale}
-            slideId={slideId}
-            activeTool={activeTool}
-            selectedNodeIds={selectedNodeIds}
-            editingNodeId={editingNodeId}
-            onSelect={onSelect}
-            onStartEditing={onStartEditing}
-            onStopEditing={onStopEditing}
-            onTextChange={onTextChange}
-            onDrag={onDrag}
-          />
-        ))}
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: groupBg,
+            overflow: node.clipContent ? 'hidden' : 'visible',
+          }}
+        >
+          {node.children?.map((child) => (
+            <CanvasNode
+              key={child.id}
+              node={child}
+              scale={scale}
+              slideId={slideId}
+              activeTool={activeTool}
+              selectedNodeIds={selectedNodeIds}
+              editingNodeId={editingNodeId}
+              onSelect={onSelect}
+              onStartEditing={onStartEditing}
+              onStopEditing={onStopEditing}
+              onTextChange={onTextChange}
+              onDrag={onDrag}
+              onResize={onResize}
+            />
+          ))}
+        </div>
+        {isSelected && !isEditing && activeTool === 'select' && (
+          <ResizeHandles node={node} scale={scale} onResize={(patch) => onResize(node.id, patch)} />
+        )}
       </div>
     );
   }
@@ -545,7 +557,140 @@ function CanvasNode({
       data-node-type={node.type}
     >
       {content}
+      {isSelected && !isEditing && activeTool === 'select' && (
+        <ResizeHandles node={node} scale={scale} onResize={(patch) => onResize(node.id, patch)} />
+      )}
     </div>
+  );
+}
+
+// ─── Resize Handles ───────────────────────────────────────────────────────────
+
+type HandleDir = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+// Map each handle direction to its CSS cursor so the pointer matches the axis
+// the user will drag along.
+const CURSOR: Record<HandleDir, string> = {
+  nw: 'nwse-resize',
+  n: 'ns-resize',
+  ne: 'nesw-resize',
+  e: 'ew-resize',
+  se: 'nwse-resize',
+  s: 'ns-resize',
+  sw: 'nesw-resize',
+  w: 'ew-resize',
+};
+
+// Minimum node size in slide units so a user cannot shrink a node to zero and
+// lose it.
+const MIN_SIZE = 8;
+
+interface ResizeHandlesProps {
+  node: SlideNode;
+  scale: number;
+  onResize: (patch: Partial<SlideNode>) => void;
+}
+
+function ResizeHandles({ node, scale, onResize }: ResizeHandlesProps) {
+  const startResize = useCallback(
+    (dir: HandleDir, e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+
+      const startMouseX = e.clientX;
+      const startMouseY = e.clientY;
+      const origX = node.x;
+      const origY = node.y;
+      const origW = node.width;
+      const origH = node.height;
+
+      // Keep the cursor consistent for the whole gesture, even when the mouse
+      // leaves the handle itself.
+      const prevBodyCursor = document.body.style.cursor;
+      document.body.style.cursor = CURSOR[dir];
+
+      const onMove = (me: MouseEvent) => {
+        const dx = (me.clientX - startMouseX) / scale;
+        const dy = (me.clientY - startMouseY) / scale;
+        let x = origX;
+        let y = origY;
+        let w = origW;
+        let h = origH;
+
+        if (dir.includes('w')) {
+          x = origX + dx;
+          w = origW - dx;
+        }
+        if (dir.includes('e')) {
+          w = origW + dx;
+        }
+        if (dir.includes('n')) {
+          y = origY + dy;
+          h = origH - dy;
+        }
+        if (dir.includes('s')) {
+          h = origH + dy;
+        }
+
+        // Clamp against MIN_SIZE while keeping the opposite edge anchored.
+        if (w < MIN_SIZE) {
+          if (dir.includes('w')) x = origX + origW - MIN_SIZE;
+          w = MIN_SIZE;
+        }
+        if (h < MIN_SIZE) {
+          if (dir.includes('n')) y = origY + origH - MIN_SIZE;
+          h = MIN_SIZE;
+        }
+
+        onResize({ x, y, width: w, height: h });
+      };
+
+      const onUp = () => {
+        document.body.style.cursor = prevBodyCursor;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [node.x, node.y, node.width, node.height, onResize, scale]
+  );
+
+  const size = 8;
+  const off = -size / 2;
+  const baseHandle: React.CSSProperties = {
+    position: 'absolute',
+    width: size,
+    height: size,
+    background: '#ffffff',
+    border: '1.5px solid #6457f0',
+    borderRadius: 1,
+    boxSizing: 'border-box',
+    zIndex: 2,
+  };
+
+  const handles: Array<{ dir: HandleDir; style: React.CSSProperties }> = [
+    { dir: 'nw', style: { top: off, left: off } },
+    { dir: 'n', style: { top: off, left: '50%', marginLeft: off } },
+    { dir: 'ne', style: { top: off, right: off } },
+    { dir: 'e', style: { top: '50%', right: off, marginTop: off } },
+    { dir: 'se', style: { bottom: off, right: off } },
+    { dir: 's', style: { bottom: off, left: '50%', marginLeft: off } },
+    { dir: 'sw', style: { bottom: off, left: off } },
+    { dir: 'w', style: { top: '50%', left: off, marginTop: off } },
+  ];
+
+  return (
+    <>
+      {handles.map((h) => (
+        <div
+          key={h.dir}
+          style={{ ...baseHandle, ...h.style, cursor: CURSOR[h.dir] }}
+          onMouseDown={(e) => startResize(h.dir, e)}
+        />
+      ))}
+    </>
   );
 }
 
