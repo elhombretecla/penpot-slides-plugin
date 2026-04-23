@@ -1,12 +1,10 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useSlideStore } from '../store';
 import SlideList from '../components/SlideList';
 import SlideCanvas from '../components/SlideCanvas';
 import PropertiesPanel from '../components/PropertiesPanel';
 import LayersPanel from '../components/LayersPanel';
 import ExportPanel from '../components/ExportPanel';
-
-type NavTab = 'editor' | 'layers' | 'config';
 
 export default function SlideManager() {
   const setScreen = useSlideStore((s) => s.setScreen);
@@ -18,7 +16,6 @@ export default function SlideManager() {
   const sidePanel = useSlideStore((s) => s.sidePanel);
   const setSidePanel = useSlideStore((s) => s.setSidePanel);
 
-  const [navTab, setNavTab] = useState<NavTab>('editor');
   const activeSlide = slides.find((s) => s.id === activeSlideId) ?? null;
 
   return (
@@ -60,56 +57,13 @@ export default function SlideManager() {
       </div>
 
       <div className="manager-body">
-        {/* Left nav */}
-        <nav className="manager-nav">
-          <button
-            className={`manager-nav-btn ${navTab === 'editor' ? 'active' : ''}`}
-            onClick={() => setNavTab('editor')}
-            title="Editor"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-            </svg>
-            <span>EDITOR</span>
-          </button>
-          <button
-            className={`manager-nav-btn ${navTab === 'layers' ? 'active' : ''}`}
-            onClick={() => setNavTab('layers')}
-            title="Layers"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="12 2 2 7 12 12 22 7 12 2"/>
-              <polyline points="2 17 12 22 22 17"/>
-              <polyline points="2 12 12 17 22 12"/>
-            </svg>
-            <span>LAYERS</span>
-          </button>
-          <button
-            className={`manager-nav-btn ${navTab === 'config' ? 'active' : ''}`}
-            onClick={() => { setNavTab('config'); setShowExportPanel(true); }}
-            title="Export Config"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
-            </svg>
-            <span>CONFIG</span>
-          </button>
-        </nav>
-
         {/* Slide list */}
         <div className="manager-slide-list">
           <SlideList />
-          <button
-            className="add-slide-btn"
-            onClick={() => setShowNewSlideModal(true)}
-            title="Add Slide"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-          </button>
+          <AddSlideMenu
+            onAddNew={() => setShowNewSlideModal(true)}
+            onAddFromLibrary={() => setScreen('library-picker')}
+          />
         </div>
 
         {/* Center canvas */}
@@ -138,50 +92,89 @@ export default function SlideManager() {
 
         {/* Right panel */}
         <div className="manager-right-panel">
-          {navTab === 'editor' && (
-            <>
-              <div className="panel-tabs">
-                <button
-                  className={`panel-tab ${sidePanel === 'properties' ? 'active' : ''}`}
-                  onClick={() => setSidePanel('properties')}
-                >
-                  Properties
-                </button>
-                <button
-                  className={`panel-tab ${sidePanel === 'layers' ? 'active' : ''}`}
-                  onClick={() => setSidePanel('layers')}
-                >
-                  Layers
-                </button>
-              </div>
-              {sidePanel === 'properties'
-                ? <PropertiesPanel slide={activeSlide} />
-                : <LayersPanel slide={activeSlide} />}
-            </>
-          )}
-
-          {navTab === 'layers' && (
-            <>
-              <div className="panel-tabs">
-                <button className="panel-tab active">Layers</button>
-              </div>
-              <LayersPanel slide={activeSlide} />
-            </>
-          )}
-
-          {navTab === 'config' && showExportPanel && (
-            <>
-              <div className="panel-tabs">
-                <button className="panel-tab active">Export</button>
-              </div>
-              <ExportPanel />
-            </>
-          )}
+          <div className="panel-tabs">
+            <button
+              className={`panel-tab ${sidePanel === 'properties' ? 'active' : ''}`}
+              onClick={() => setSidePanel('properties')}
+            >
+              Properties
+            </button>
+            <button
+              className={`panel-tab ${sidePanel === 'layers' ? 'active' : ''}`}
+              onClick={() => setSidePanel('layers')}
+            >
+              Layers
+            </button>
+          </div>
+          {sidePanel === 'properties'
+            ? <PropertiesPanel slide={activeSlide} />
+            : <LayersPanel slide={activeSlide} />}
         </div>
       </div>
 
-      {/* Export overlay (when triggered from topbar) */}
-      {showExportPanel && navTab !== 'config' && <ExportOverlay />}
+      {/* Export overlay */}
+      {showExportPanel && <ExportOverlay />}
+    </div>
+  );
+}
+
+interface AddSlideMenuProps {
+  onAddNew: () => void;
+  onAddFromLibrary: () => void;
+}
+
+function AddSlideMenu({ onAddNew, onAddFromLibrary }: AddSlideMenuProps) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
+  return (
+    <div className="add-slide-menu-root" ref={ref}>
+      {open && (
+        <div className="add-slide-menu">
+          <button
+            className="add-slide-menu-item"
+            onClick={() => { setOpen(false); onAddNew(); }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"/>
+              <line x1="12" y1="21" x2="12" y2="17"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+            </svg>
+            Add new slide
+          </button>
+          <button
+            className="add-slide-menu-item"
+            onClick={() => { setOpen(false); onAddFromLibrary(); }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <rect x="3" y="3" width="8" height="8" rx="1"/>
+              <rect x="13" y="3" width="8" height="8" rx="1"/>
+              <rect x="3" y="13" width="8" height="8" rx="1"/>
+            </svg>
+            Add from library
+          </button>
+        </div>
+      )}
+      <button
+        className="add-slide-btn"
+        onClick={() => setOpen((v) => !v)}
+        title="Add Slide"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
     </div>
   );
 }

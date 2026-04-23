@@ -138,10 +138,6 @@ function NodeProperties({
           />
         </PropRow>
 
-        <PropRow label="Visible">
-          <Toggle value={node.visible} onChange={(v) => onUpdate({ visible: v })} />
-        </PropRow>
-
         <button className="prop-delete-btn" onClick={onDelete}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>

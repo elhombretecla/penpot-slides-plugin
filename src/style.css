@@ -271,6 +271,10 @@ html, body, #root, .app-root {
 }
 
 /* Override .input padding for the search field with icon */
+.input, .textarea {
+  width: 100%;
+}
+
 .picker-search {
   padding-left: 28px !important;
 }
@@ -484,39 +488,6 @@ html, body, #root, .app-root {
 .manager-body { display: flex; flex: 1; overflow: hidden; }
 
 /* Left nav icons */
-.manager-nav {
-  width: 54px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--background-quaternary);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: var(--spacing-8) 0;
-  gap: var(--spacing-4);
-}
-
-.manager-nav-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  width: 46px;
-  padding: var(--spacing-8) var(--spacing-4);
-  border-radius: var(--spacing-8);
-  border: none;
-  background: none;
-  color: var(--foreground-secondary);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-bold);
-  letter-spacing: 0.03em;
-  font-family: inherit;
-}
-.manager-nav-btn:hover { background: var(--background-tertiary); color: var(--foreground-primary); }
-.manager-nav-btn.active { color: var(--accent-primary); background: var(--accent-primary-muted); }
-
 /* Slide list column */
 .manager-slide-list {
   width: 80px;
@@ -524,11 +495,12 @@ html, body, #root, .app-root {
   border-right: 1px solid var(--background-quaternary);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .slide-list {
   flex: 1;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -652,6 +624,7 @@ html, body, #root, .app-root {
 }
 
 .add-slide-btn {
+  width: 100%;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -666,6 +639,47 @@ html, body, #root, .app-root {
   font-family: inherit;
 }
 .add-slide-btn:hover { background: var(--background-tertiary); color: var(--accent-primary); }
+
+.add-slide-menu-root {
+  position: relative;
+  flex-shrink: 0;
+  width: 100%;
+}
+
+.add-slide-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  min-width: 160px;
+  background: var(--background-tertiary);
+  border: 1px solid var(--background-quaternary);
+  border-radius: var(--border-radius-m);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.add-slide-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-8);
+  padding: var(--spacing-8) var(--spacing-12);
+  border: none;
+  background: none;
+  color: var(--foreground-primary);
+  font-size: var(--font-size-s);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+.add-slide-menu-item svg { flex-shrink: 0; color: var(--foreground-secondary); }
+.add-slide-menu-item:hover { background: var(--background-quaternary); color: var(--accent-primary); }
+.add-slide-menu-item:hover svg { color: var(--accent-primary); }
+.add-slide-menu-item + .add-slide-menu-item { border-top: 1px solid var(--background-quaternary); }
 
 /* Canvas area */
 .manager-canvas-area {
@@ -778,22 +792,6 @@ html, body, #root, .app-root {
   margin: 0 2px;
 }
 
-.canvas-slide-info {
-  font-size: var(--font-size-xs);
-  color: var(--foreground-secondary);
-  padding: 0 var(--spacing-4);
-}
-
-.canvas-component-badge {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-4);
-  font-size: var(--font-size-xs);
-  color: var(--accent-primary);
-  background: var(--accent-primary-muted);
-  padding: 2px var(--spacing-8);
-  border-radius: 10px;
-}
 
 .canvas-wrapper {
   flex: 1;
