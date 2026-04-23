@@ -6,6 +6,7 @@ import type {
   ExportSettings,
   ImportItemRequest,
 } from './types';
+import type { Fill, Stroke } from '@penpot/plugin-types';
 
 // Open the plugin UI at a comfortable size for a slide builder
 penpot.ui.open('Slide Builder', `?theme=${penpot.theme}`, {
@@ -139,6 +140,17 @@ async function handleGetComponents(libraryId: string) {
   }
 }
 
+// Plain deep-clone helper for serialisable payloads (fills, strokes, etc.).
+// Used so the snapshots we send to the UI are independent of the live Penpot
+// shape and survive the postMessage structured-clone hop.
+function clonePlain<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
 function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 8192;
@@ -190,6 +202,7 @@ async function handleImportComponents(requestId: string, items: ImportItemReques
         componentName: item.componentName,
         nodes: result.nodes,
         background: result.background,
+        backgroundFills: result.backgroundFills,
         width: result.width,
         height: result.height,
       };
@@ -220,6 +233,7 @@ async function handleImportComponents(requestId: string, items: ImportItemReques
 interface ImportResult {
   nodes: SlideNode[];
   background: string;
+  backgroundFills?: unknown[];
   width: number;
   height: number;
 }
@@ -333,8 +347,9 @@ async function buildResultFromRoot(
   const width = root.width ?? item.width ?? 1280;
   const height = root.height ?? item.height ?? 720;
   const background = readBackground(root) ?? '#18181a';
+  const backgroundFills = readFillsSnapshot(root);
   const nodes = await importRootShape(root);
-  return { nodes, background, width, height };
+  return { nodes, background, backgroundFills, width, height };
 }
 
 // Read the content of a component root. If the root is a container (board /
@@ -408,11 +423,15 @@ async function importShape(
   const firstFill = fills[0];
   const fillColor = firstFill?.fillColor;
   const fillOpacity = firstFill?.fillOpacity ?? 1;
+  // Deep-clone the full array so gradients / image fills / multi-fills survive
+  // the postMessage round-trip and are decoupled from the live Penpot shape.
+  const fillsSnapshot = fills.length > 0 ? clonePlain(fills) : undefined;
 
   const strokes = 'strokes' in shape && Array.isArray(shape.strokes) ? shape.strokes : [];
   const firstStroke = strokes[0];
   const strokeColor = firstStroke?.strokeColor;
   const strokeWidth = firstStroke?.strokeWidth;
+  const strokesSnapshot = strokes.length > 0 ? clonePlain(strokes) : undefined;
 
   // A component instance is typically a board that exposes a `component` ref.
   // We treat it as a single editable block, keeping the link metadata so the
@@ -467,6 +486,7 @@ async function importShape(
       clipContent: true,
       fill: fillColor,
       fillOpacity,
+      fills: fillsSnapshot,
       children: nestedNodes,
     };
   }
@@ -490,6 +510,8 @@ async function importShape(
         shape.lineHeight !== 'mixed' ? parseFloat(String(shape.lineHeight)) || 1.4 : 1.4,
       letterSpacing:
         shape.letterSpacing !== 'mixed' ? parseFloat(String(shape.letterSpacing)) || 0 : 0,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
     };
   }
 
@@ -501,6 +523,8 @@ async function importShape(
       fillOpacity,
       strokeColor,
       strokeWidth,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
     };
   }
 
@@ -513,6 +537,8 @@ async function importShape(
       strokeColor,
       strokeWidth,
       borderRadius: ('borderRadius' in shape ? (shape.borderRadius as number) : 0) ?? 0,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
     };
   }
 
@@ -524,6 +550,8 @@ async function importShape(
       imageUrl,
       fill: fillColor,
       fillOpacity,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
     };
   }
 
@@ -537,6 +565,8 @@ async function importShape(
       fillOpacity,
       strokeColor,
       strokeWidth,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
     };
   }
 
@@ -548,6 +578,8 @@ async function importShape(
     imageUrl,
     fill: fillColor,
     fillOpacity,
+    fills: fillsSnapshot,
+    strokes: strokesSnapshot,
   };
 }
 
@@ -641,6 +673,19 @@ function readBackground(shape: unknown): string | null {
   return null;
 }
 
+function readFillsSnapshot(shape: unknown): unknown[] | undefined {
+  if (!shape || typeof shape !== 'object') return undefined;
+  try {
+    const fills = (shape as { fills?: unknown }).fills;
+    if (Array.isArray(fills) && fills.length > 0) {
+      return clonePlain(fills);
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
 // ─── Canvas Insertion ─────────────────────────────────────────────────────────
 
 function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
@@ -718,14 +763,60 @@ function createBoardForSlide(
   board.resize(slide.width, slide.height);
   board.clipContent = true;
 
-  board.fills = [
-    {
-      fillColor: slide.background,
-      fillOpacity: 1,
-    },
-  ];
+  // Prefer the full fills snapshot captured at import time — keeps gradients,
+  // image fills, multi-fill stacks and per-fill opacities. Fall back to the
+  // flat hex background for slides created from scratch in the plugin.
+  if (slide.backgroundFills && slide.backgroundFills.length > 0) {
+    board.fills = clonePlain(slide.backgroundFills) as Fill[];
+  } else {
+    board.fills = [
+      {
+        fillColor: slide.background,
+        fillOpacity: 1,
+      },
+    ];
+  }
 
   return board;
+}
+
+// Apply the full fills/strokes snapshots when available; otherwise synthesise
+// a single solid fill / stroke from the flat convenience fields so nodes
+// created from scratch in the plugin UI still render correctly.
+// `text.fills` can be `'mixed'` in the getter but accepts a `Fill[]` on write,
+// so the parameter type widens to accommodate both rect/ellipse and text.
+function applyFillsAndStrokes(
+  shape: {
+    fills: Fill[] | 'mixed';
+    strokes: Stroke[] | 'mixed';
+  },
+  node: SlideNode,
+  defaults: { fill: string; fillOpacity?: number }
+) {
+  if (node.fills && node.fills.length > 0) {
+    shape.fills = clonePlain(node.fills) as Fill[];
+  } else {
+    shape.fills = [
+      {
+        fillColor: node.fill ?? defaults.fill,
+        fillOpacity: node.fillOpacity ?? defaults.fillOpacity ?? 1,
+      },
+    ];
+  }
+
+  if (node.strokes && node.strokes.length > 0) {
+    shape.strokes = clonePlain(node.strokes) as Stroke[];
+  } else if (node.strokeColor && node.strokeWidth) {
+    shape.strokes = [
+      {
+        strokeStyle: 'solid',
+        strokeColor: node.strokeColor,
+        strokeOpacity: 1,
+        strokeWidth: node.strokeWidth,
+        strokeAlignment: 'center',
+      },
+    ];
+  }
 }
 
 // Recursive board populator. Group nodes accumulate their offset so children
@@ -775,14 +866,10 @@ function populateBoardWithNodes(
           if (node.lineHeight != null) text.lineHeight = String(node.lineHeight);
           if (node.letterSpacing != null) text.letterSpacing = String(node.letterSpacing);
           if (node.textAlign) text.align = node.textAlign;
-          if (node.fontColor) {
-            text.fills = [
-              {
-                fillColor: node.fontColor,
-                fillOpacity: 1,
-              },
-            ];
-          }
+
+          applyFillsAndStrokes(text, node, {
+            fill: node.fontColor ?? '#ffffff',
+          });
 
           board.appendChild(text);
         }
@@ -798,27 +885,10 @@ function populateBoardWithNodes(
         rect.opacity = node.opacity;
         rect.rotation = node.rotation;
 
-        rect.fills = [
-          {
-            fillColor: node.fill ?? '#d0d0d0',
-            fillOpacity: node.fillOpacity ?? 1,
-          },
-        ];
+        applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
 
         if (node.borderRadius) {
           rect.borderRadius = node.borderRadius;
-        }
-
-        if (node.strokeColor && node.strokeWidth) {
-          rect.strokes = [
-            {
-              strokeStyle: 'solid',
-              strokeColor: node.strokeColor,
-              strokeOpacity: 1,
-              strokeWidth: node.strokeWidth,
-              strokeAlignment: 'center',
-            },
-          ];
         }
 
         board.appendChild(rect);
@@ -834,24 +904,7 @@ function populateBoardWithNodes(
         ellipse.opacity = node.opacity;
         ellipse.rotation = node.rotation;
 
-        ellipse.fills = [
-          {
-            fillColor: node.fill ?? '#ffffff',
-            fillOpacity: node.fillOpacity ?? 1,
-          },
-        ];
-
-        if (node.strokeColor && node.strokeWidth) {
-          ellipse.strokes = [
-            {
-              strokeStyle: 'solid',
-              strokeColor: node.strokeColor,
-              strokeOpacity: 1,
-              strokeWidth: node.strokeWidth,
-              strokeAlignment: 'center',
-            },
-          ];
-        }
+        applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
 
         board.appendChild(ellipse);
         continue;

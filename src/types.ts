@@ -40,11 +40,22 @@ export interface SlideNode {
   letterSpacing?: number;
 
   // Shape-specific (rect / ellipse / path / image background)
+  // Convenience fields derived from the first fill/stroke — used by the plugin
+  // UI for quick color pickers and previews.
   fill?: string;
   fillOpacity?: number;
   strokeColor?: string;
   strokeWidth?: number;
   borderRadius?: number;
+
+  // Full fill/stroke arrays captured from Penpot — preserve gradients, image
+  // fills, multi-fill stacks and per-fill opacities that the convenience
+  // fields above cannot represent. When present these take precedence when
+  // writing back to Penpot. Typed as `unknown[]` to keep this module free of
+  // the Penpot namespace; the plugin host casts them back to `Fill[]` /
+  // `Stroke[]` before applying.
+  fills?: unknown[];
+  strokes?: unknown[];
 
   // Image / path / component-instance visual snapshot (base64 PNG data URL).
   // Used so the plugin UI can render elements that are not perfectly modelled
@@ -88,6 +99,9 @@ export interface Slide {
   width: number;
   height: number;
   background: string;
+  // Full backing `fills` array from the source board (gradients, images, etc.)
+  // When present this takes precedence over `background` when writing back.
+  backgroundFills?: unknown[];
   nodes: SlideNode[];
 
   // Library component slides
@@ -134,6 +148,7 @@ export interface ImportedComponentPayload {
   componentName: string;
   nodes: SlideNode[];
   background: string;
+  backgroundFills?: unknown[];
   width: number;
   height: number;
   importedAt: number;
@@ -196,6 +211,7 @@ export type PluginMessage =
       componentName: string;
       nodes: SlideNode[];
       background: string;
+      backgroundFills?: unknown[];
       width: number;
       height: number;
     }
