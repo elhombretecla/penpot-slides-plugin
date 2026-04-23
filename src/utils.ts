@@ -241,3 +241,108 @@ export function hexToRgb(hex: string): { r: number; g: number; b: number } | nul
       }
     : null;
 }
+
+// ─── Penpot Fill → CSS conversion ─────────────────────────────────────────────
+
+// Duck-typed shape of a Penpot `Fill` — we avoid pulling the Penpot namespace
+// into the UI bundle, so fills arrive as `unknown[]` via postMessage and are
+// narrowed structurally here.
+type PenpotFillLike = {
+  fillColor?: string;
+  fillOpacity?: number;
+  fillColorGradient?: {
+    type: 'linear' | 'radial';
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+    width?: number;
+    stops: Array<{ color: string; opacity?: number; offset: number }>;
+  };
+  fillImage?: unknown;
+};
+
+function colorWithOpacity(color: string, alpha: number): string {
+  if (alpha >= 1) return color;
+  const rgb = hexToRgb(color);
+  if (!rgb) return color;
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+function gradientToCss(g: NonNullable<PenpotFillLike['fillColorGradient']>): string {
+  const stops = g.stops
+    .map((s) => {
+      const color = colorWithOpacity(s.color ?? '#000000', s.opacity ?? 1);
+      return `${color} ${(s.offset * 100).toFixed(2)}%`;
+    })
+    .join(', ');
+
+  if (g.type === 'linear') {
+    // Penpot gradient is defined in normalized shape coords (y grows downward).
+    // CSS `linear-gradient` 0deg points up; atan2(dy, dx) gives the angle from
+    // the +x axis going clockwise in screen space, and +90° rotates it so that
+    // "downward in shape" matches "downward in CSS" (180deg).
+    const dx = g.endX - g.startX;
+    const dy = g.endY - g.startY;
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+    return `linear-gradient(${angle.toFixed(2)}deg, ${stops})`;
+  }
+
+  const cx = (g.startX * 100).toFixed(2);
+  const cy = (g.startY * 100).toFixed(2);
+  const dx = g.endX - g.startX;
+  const dy = g.endY - g.startY;
+  const radius = Math.sqrt(dx * dx + dy * dy);
+  const r = Math.max(0.01, radius) * 100;
+  return `radial-gradient(${r.toFixed(2)}% ${r.toFixed(2)}% at ${cx}% ${cy}%, ${stops})`;
+}
+
+// Convert a Penpot `Fill[]` snapshot into a CSS `background` value so the
+// plugin preview matches what will be exported. Returns `undefined` when the
+// array is empty or contains only unsupported fills (e.g. pure image fills
+// with no resolvable URL) — callers should fall back to `node.imageUrl` or the
+// flat `fill` color.
+export function fillsToCss(fills: unknown[] | undefined): string | undefined {
+  if (!fills || fills.length === 0) return undefined;
+
+  // Fast-path: one solid color.
+  if (fills.length === 1) {
+    const only = fills[0] as PenpotFillLike;
+    if (only.fillColor && !only.fillColorGradient && !only.fillImage) {
+      return colorWithOpacity(only.fillColor, only.fillOpacity ?? 1);
+    }
+  }
+
+  const layers: string[] = [];
+  for (const raw of fills) {
+    const f = raw as PenpotFillLike;
+    if (f.fillColorGradient) {
+      layers.push(gradientToCss(f.fillColorGradient));
+    } else if (f.fillColor) {
+      // Wrap solid colors in a trivial gradient so they compose with other
+      // layers in the comma-separated `background` shorthand.
+      const color = colorWithOpacity(f.fillColor, f.fillOpacity ?? 1);
+      layers.push(`linear-gradient(${color}, ${color})`);
+    }
+    // Image fills cannot be resolved from the UI bundle (the Penpot ImageData
+    // id is opaque here); caller uses `node.imageUrl` as a fallback.
+  }
+
+  if (layers.length === 0) return undefined;
+  return layers.join(', ');
+}
+
+// Pull the first usable solid color out of a fills array — used for text
+// color, which CSS cannot gradient-fill without extra tricks.
+export function firstFillColor(fills: unknown[] | undefined): string | undefined {
+  if (!fills || fills.length === 0) return undefined;
+  for (const raw of fills) {
+    const f = raw as PenpotFillLike;
+    if (f.fillColor) return colorWithOpacity(f.fillColor, f.fillOpacity ?? 1);
+    if (f.fillColorGradient && f.fillColorGradient.stops.length > 0) {
+      const s = f.fillColorGradient.stops[0];
+      return colorWithOpacity(s.color ?? '#000000', s.opacity ?? 1);
+    }
+  }
+  return undefined;
+}

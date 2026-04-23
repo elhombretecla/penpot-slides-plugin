@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide, SlideNode } from '../types';
-import { makeRectNode, makeEllipseNode, makeTextNode } from '../utils';
+import { makeRectNode, makeEllipseNode, makeTextNode, fillsToCss, firstFillColor } from '../utils';
 
 interface Props {
   slide: Slide | null;
@@ -173,7 +173,7 @@ export default function SlideCanvas({ slide }: Props) {
           style={{
             width: displayW,
             height: displayH,
-            background: slide.background,
+            background: fillsToCss(slide.backgroundFills) ?? slide.background,
             position: 'relative',
             overflow: 'hidden',
           }}
@@ -343,12 +343,12 @@ function CanvasNode({
   // Groups render a container and recurse into children (children are
   // positioned relative to the group, so we just render them inside).
   if (node.type === 'group') {
+    const groupBg = node.clipContent
+      ? fillsToCss(node.fills) ?? node.fill ?? 'transparent'
+      : 'transparent';
     const groupStyle: React.CSSProperties = {
       ...wrapperStyle,
-      background:
-        node.fill && node.clipContent
-          ? node.fill
-          : 'transparent',
+      background: groupBg,
       overflow: node.clipContent ? 'hidden' : 'visible',
     };
 
@@ -382,12 +382,13 @@ function CanvasNode({
 
   const content = (() => {
     if (node.type === 'text') {
+      const textColor = firstFillColor(node.fills) ?? node.fontColor ?? '#ffffff';
       return (
         <div
           style={{
             width: '100%',
             height: '100%',
-            color: node.fontColor ?? '#ffffff',
+            color: textColor,
             fontSize: (node.fontSize ?? 16) * scale,
             fontWeight: node.fontWeight ?? '400',
             fontFamily: node.fontFamily ?? 'sans-serif',
@@ -406,7 +407,7 @@ function CanvasNode({
               style={{
                 width: '100%',
                 height: '100%',
-                color: node.fontColor ?? '#ffffff',
+                color: textColor,
                 fontSize: (node.fontSize ?? 16) * scale,
                 fontWeight: node.fontWeight ?? '400',
                 fontFamily: node.fontFamily ?? 'sans-serif',
@@ -437,7 +438,7 @@ function CanvasNode({
           style={{
             width: '100%',
             height: '100%',
-            background: node.fill ?? '#6457f0',
+            background: fillsToCss(node.fills) ?? node.fill ?? '#6457f0',
             borderRadius: node.borderRadius ? node.borderRadius * scale : 0,
             border: node.strokeColor ? `${(node.strokeWidth ?? 1) * scale}px solid ${node.strokeColor}` : undefined,
           }}
@@ -451,7 +452,7 @@ function CanvasNode({
           style={{
             width: '100%',
             height: '100%',
-            background: node.fill ?? '#6457f0',
+            background: fillsToCss(node.fills) ?? node.fill ?? '#6457f0',
             borderRadius: '50%',
             border: node.strokeColor ? `${(node.strokeWidth ?? 1) * scale}px solid ${node.strokeColor}` : undefined,
           }}
@@ -481,7 +482,7 @@ function CanvasNode({
           style={{
             width: '100%',
             height: '100%',
-            background: node.fill ?? 'rgba(100,87,240,0.15)',
+            background: fillsToCss(node.fills) ?? node.fill ?? 'rgba(100,87,240,0.15)',
             border: '1px dashed rgba(100,87,240,0.5)',
           }}
         />
