@@ -81,7 +81,7 @@ export default function HomeScreen() {
                 <rect x="2" y="3" width="20" height="14" rx="2"/>
                 <path d="M8 21h8M12 17v4"/>
               </svg>
-              <p className="body-s">No libraries connected yet.</p>
+              <p className="body-s home-empty-title">No libraries connected yet.</p>
               <p className="body-xs home-empty-hint">Connect shared libraries in Penpot to use components as slide templates.</p>
             </div>
           ) : (

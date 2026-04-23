@@ -32,6 +32,7 @@ html, body, #root, .app-root {
 button {
   display: flex;
   align-items: center;
+  gap: var(--spacing-4);
 }
 
 .btn-icon {
@@ -115,6 +116,10 @@ button {
   color: var(--accent-primary);
 }
 
+.home-logo {
+  height: 15px;
+}
+
 .home-body {
   display: flex;
   flex: 1;
@@ -172,8 +177,13 @@ button {
   color: var(--foreground-secondary);
 }
 
+.home-empty-title {
+  font-size: var(--font-size-m);
+  font-weight: var(--font-weight-bold);
+}
+
 .home-empty-hint {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-s);
   line-height: var(--font-line-height-m);
 }
 
@@ -451,7 +461,7 @@ button {
 .preview-line--narrow { width: 50%; }
 
 .component-name {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-s);
   color: var(--foreground-secondary);
   padding: 0 var(--spacing-4);
   white-space: nowrap;

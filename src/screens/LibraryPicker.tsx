@@ -137,11 +137,6 @@ export default function LibraryPicker() {
           </svg>
         </button>
         <span className="title-s picker-title">Import from Library</span>
-        <button className="btn-icon" onClick={() => setScreen('slide-manager')} title="Close">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
-        </button>
       </div>
 
       <div className="picker-body">
@@ -308,6 +303,10 @@ function ComponentCard({ component, selected, onToggle, isSuggested }: Component
   );
 }
 
+// Natural collator so "Slide 2" sorts before "Slide 10" instead of after it
+// — plain string comparison would produce "Slide 1, Slide 10, Slide 2…".
+const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
 function groupBySection(components: ComponentInfo[]): Record<string, ComponentInfo[]> {
   const groups: Record<string, ComponentInfo[]> = {};
   for (const comp of components) {
@@ -317,6 +316,9 @@ function groupBySection(components: ComponentInfo[]): Record<string, ComponentIn
   }
   if (Object.keys(groups).length === 0 && components.length > 0) {
     groups['Components'] = components;
+  }
+  for (const key of Object.keys(groups)) {
+    groups[key].sort((a, b) => NAME_COLLATOR.compare(a.name, b.name));
   }
   return groups;
 }
