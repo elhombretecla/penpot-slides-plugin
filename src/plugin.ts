@@ -717,6 +717,14 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
     deck.resize(deckWidth, deckHeight);
     // Transparent wrapper — the deck is a layout container, not a visual slide.
     deck.fills = [];
+    // "Fit content horizontally" on the board itself (Board.horizontalSizing
+    // in the Penpot API — 'auto' = hug content, 'fix' = keep intrinsic size).
+    // With this on, the deck stays tight around the slides even after the
+    // user adds or removes boards.
+    deck.horizontalSizing = 'auto';
+    // Don't clip overflow — the deck is a wrapper, not a viewport. Anything
+    // that bleeds outside (shadows, decorative elements) should stay visible.
+    deck.clipContent = false;
 
     const flex = deck.addFlexLayout();
     flex.dir = 'row';
