@@ -8,6 +8,8 @@ import {
   fillsToCss,
   firstFillColor,
   findNodeById,
+  findNodeAbs,
+  cloneNodeWithNewIds,
 } from '../utils';
 
 interface Props {
@@ -23,6 +25,26 @@ const CANVAS_MAX_HEIGHT = 400;
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 8;
 const ZOOM_STEP = 1.2;
+
+// Distance (in slide units) each successive paste shifts so the user can see
+// the new copy instead of it stacking invisibly on top of the original.
+const PASTE_OFFSET = 20;
+
+// Drop selected ids whose ancestor is also selected — avoids double-pasting
+// a child that's already coming along inside its parent's clone.
+function dropDominatedIds(nodes: SlideNode[], ids: string[]): string[] {
+  const selected = new Set(ids);
+  const dominated = new Set<string>();
+  const visit = (ns: SlideNode[], parentSelected: boolean) => {
+    for (const n of ns) {
+      const isSel = selected.has(n.id);
+      if (isSel && parentSelected) dominated.add(n.id);
+      if (n.children) visit(n.children, isSel || parentSelected);
+    }
+  };
+  visit(nodes, false);
+  return ids.filter((id) => !dominated.has(id));
+}
 
 function clampZoom(z: number) {
   return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
@@ -121,6 +143,102 @@ export default function SlideCanvas({ slide }: Props) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
+  // In-memory clipboard. Each entry is a deep-cloned node plus the absolute
+  // slide position it should paste at — starts as the source's absolute
+  // position and advances by PASTE_OFFSET after every paste so consecutive
+  // pastes stagger visibly.
+  const clipboardRef = useRef<Array<{ node: SlideNode; absX: number; absY: number }>>([]);
+
+  // Ctrl/Cmd + C copies the current selection; Ctrl/Cmd + V pastes. Pastes
+  // always land at the top of the stack on the active slide as flat
+  // top-level nodes (children lifted out of groups keep their original
+  // absolute position) and become the new selection, in one undoable step.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key !== 'c' && key !== 'v') return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      const editable = t?.isContentEditable;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
+      if (editingNodeId) return;
+      if (!slide) return;
+
+      if (key === 'c') {
+        if (selectedNodeIds.length === 0) return;
+        e.preventDefault();
+        const ids = dropDominatedIds(slide.nodes, selectedNodeIds);
+        const items: Array<{ node: SlideNode; absX: number; absY: number }> = [];
+        for (const id of ids) {
+          const found = findNodeAbs(slide.nodes, id);
+          if (!found) continue;
+          items.push({
+            node: cloneNodeWithNewIds(found.node),
+            absX: found.absX,
+            absY: found.absY,
+          });
+        }
+        if (items.length > 0) clipboardRef.current = items;
+        return;
+      }
+
+      // key === 'v'
+      if (clipboardRef.current.length === 0) return;
+      e.preventDefault();
+      commitHistory();
+      const slideId = slide.id;
+
+      // Anchor the pasted cluster's bounding-box center to the mouse when the
+      // pointer is over the slide; otherwise advance by PASTE_OFFSET so
+      // keyboard-only users still see each paste as a visible stagger.
+      const mousePos = mouseSlidePosRef.current;
+      let dx: number;
+      let dy: number;
+      if (mousePos) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const item of clipboardRef.current) {
+          if (item.absX < minX) minX = item.absX;
+          if (item.absY < minY) minY = item.absY;
+          if (item.absX + item.node.width > maxX) maxX = item.absX + item.node.width;
+          if (item.absY + item.node.height > maxY) maxY = item.absY + item.node.height;
+        }
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        dx = mousePos.x - cx;
+        dy = mousePos.y - cy;
+      } else {
+        dx = PASTE_OFFSET;
+        dy = PASTE_OFFSET;
+      }
+
+      const newIds: string[] = [];
+      for (const item of clipboardRef.current) {
+        const fresh = cloneNodeWithNewIds(item.node);
+        fresh.x = item.absX + dx;
+        fresh.y = item.absY + dy;
+        addNode(slideId, fresh);
+        newIds.push(fresh.id);
+      }
+      // For keyboard-only fallback, advance the stored positions so the next
+      // paste staggers again. Mouse-anchored paste leaves them alone — the
+      // cursor decides where the next paste goes.
+      if (!mousePos) {
+        clipboardRef.current = clipboardRef.current.map((c) => ({
+          ...c,
+          absX: c.absX + PASTE_OFFSET,
+          absY: c.absY + PASTE_OFFSET,
+        }));
+      }
+      setSelectedNodes(newIds);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [slide, selectedNodeIds, editingNodeId, addNode, commitHistory, setSelectedNodes]);
+
   // Ctrl/Cmd + wheel zoom. React's synthetic wheel listener is passive in
   // modern React, which blocks preventDefault — attach a native listener with
   // { passive: false } so the browser's built-in zoom doesn't fire instead.
@@ -147,6 +265,11 @@ export default function SlideCanvas({ slide }: Props) {
     | null
   >(null);
   const [canvasDragRect, setCanvasDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  // Last known mouse position in SLIDE coordinates while the pointer is over
+  // the canvas. Used by paste to drop the clipboard under the cursor. Null
+  // when the pointer is outside the slide.
+  const mouseSlidePosRef = useRef<{ x: number; y: number } | null>(null);
 
   if (!slide) {
     return (
@@ -199,10 +322,14 @@ export default function SlideCanvas({ slide }: Props) {
   );
 
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canvasDragRef.current || !canvasRef.current) return;
+    if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+    // Always track mouse in slide coordinates so paste can anchor to it,
+    // regardless of whether a marquee/draw gesture is active.
+    mouseSlidePosRef.current = { x: x / scale, y: y / scale };
+    if (!canvasDragRef.current) return;
     const { startX, startY } = canvasDragRef.current;
     setCanvasDragRect({
       x: Math.min(x, startX),
@@ -210,7 +337,7 @@ export default function SlideCanvas({ slide }: Props) {
       w: Math.abs(x - startX),
       h: Math.abs(y - startY),
     });
-  }, []);
+  }, [scale]);
 
   const handleCanvasMouseUp = useCallback(
     (_e: React.MouseEvent<HTMLDivElement>) => {
@@ -498,6 +625,7 @@ export default function SlideCanvas({ slide }: Props) {
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={handleCanvasMouseUp}
+          onMouseLeave={() => { mouseSlidePosRef.current = null; }}
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
 

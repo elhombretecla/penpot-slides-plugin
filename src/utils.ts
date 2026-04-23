@@ -245,6 +245,40 @@ export function findNodeById(nodes: SlideNode[], id: string): SlideNode | null {
   return null;
 }
 
+// Like findNodeById but also returns the accumulated parent offset so the
+// caller can reproduce the node at an absolute slide position (used by paste
+// to lift children out of groups and by any code that needs "where does this
+// node actually sit on the slide").
+export function findNodeAbs(
+  nodes: SlideNode[],
+  id: string,
+  offsetX = 0,
+  offsetY = 0
+): { node: SlideNode; absX: number; absY: number } | null {
+  for (const n of nodes) {
+    if (n.id === id) return { node: n, absX: offsetX + n.x, absY: offsetY + n.y };
+    if (n.children) {
+      const f = findNodeAbs(n.children, id, offsetX + n.x, offsetY + n.y);
+      if (f) return f;
+    }
+  }
+  return null;
+}
+
+// Deep-clone a node tree and assign a fresh uuid to every descendant. The
+// clone is fully decoupled from the source so subsequent edits to the paste
+// don't mutate the clipboard.
+export function cloneNodeWithNewIds(node: SlideNode): SlideNode {
+  const copy: SlideNode =
+    typeof structuredClone === 'function' ? structuredClone(node) : JSON.parse(JSON.stringify(node));
+  const reassign = (n: SlideNode) => {
+    n.id = uuidv4();
+    if (n.children) n.children.forEach(reassign);
+  };
+  reassign(copy);
+  return copy;
+}
+
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result
