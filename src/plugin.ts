@@ -668,8 +668,10 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
           const comp = lib?.components.find((c) => c.id === slide.componentId);
           if (comp) {
             const instance = comp.instance();
-            instance.x = 0;
-            instance.y = 0;
+            // Penpot shape coordinates are absolute in the canvas, so we
+            // position the instance at the board's absolute origin.
+            instance.x = board.x;
+            instance.y = board.y;
             board.appendChild(instance);
           }
         } catch {
@@ -678,7 +680,10 @@ function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
         insertedBoards.push(board);
       } else {
         const board = createBoardForSlide(slide, xOffset, yBase, slideName);
-        populateBoardWithNodes(board, slide.nodes, 0, 0);
+        // SlideNode coordinates are relative to the slide origin; Penpot shape
+        // coordinates are absolute in the canvas — offset by the board's
+        // absolute position so children land inside the board.
+        populateBoardWithNodes(board, slide.nodes, board.x, board.y);
         insertedBoards.push(board);
       }
 
@@ -725,13 +730,21 @@ function createBoardForSlide(
 
 // Recursive board populator. Group nodes accumulate their offset so children
 // land at the correct absolute slide coordinates.
+//
+// Iteration order: `slide.nodes[0]` is the top of the visual stack in our
+// model (matches how `SlideCanvas` renders via `.map()` where later DOM
+// siblings paint on top). Penpot stacks children such that calling
+// `board.appendChild` for each node in natural order results in the first
+// array element ending up BEHIND the others. Iterating in reverse so the
+// top-of-stack node is appended last keeps it visually on top in Penpot.
 function populateBoardWithNodes(
   board: ReturnType<typeof penpot.createBoard>,
   nodes: SlideNode[],
   offsetX: number,
   offsetY: number
 ) {
-  for (const node of nodes) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
     if (!node.visible) continue;
 
     const absX = offsetX + node.x;
@@ -747,11 +760,30 @@ function populateBoardWithNodes(
         const text = penpot.createText(node.text ?? '');
         if (text) {
           text.name = node.name;
+          // Fixed growth so resize() honours the slide layout instead of
+          // auto-fitting to the characters.
+          text.growType = 'fixed';
           text.x = absX;
           text.y = absY;
           text.resize(node.width, node.height);
           text.opacity = node.opacity;
           text.rotation = node.rotation;
+
+          if (node.fontFamily) text.fontFamily = node.fontFamily;
+          if (node.fontSize != null) text.fontSize = String(node.fontSize);
+          if (node.fontWeight) text.fontWeight = node.fontWeight;
+          if (node.lineHeight != null) text.lineHeight = String(node.lineHeight);
+          if (node.letterSpacing != null) text.letterSpacing = String(node.letterSpacing);
+          if (node.textAlign) text.align = node.textAlign;
+          if (node.fontColor) {
+            text.fills = [
+              {
+                fillColor: node.fontColor,
+                fillOpacity: 1,
+              },
+            ];
+          }
+
           board.appendChild(text);
         }
         continue;
