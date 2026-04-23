@@ -283,19 +283,6 @@ function ColorInput({ value, onChange }: { value: string; onChange: (v: string) 
   );
 }
 
-function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      className={`toggle ${value ? 'on' : 'off'}`}
-      onClick={() => onChange(!value)}
-      role="switch"
-      aria-checked={value}
-    >
-      <span className="toggle-thumb" />
-    </button>
-  );
-}
-
 function AlignButtons({
   value, onChange,
 }: { value: 'left' | 'center' | 'right'; onChange: (v: 'left' | 'center' | 'right') => void }) {

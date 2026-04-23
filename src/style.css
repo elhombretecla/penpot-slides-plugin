@@ -29,6 +29,10 @@ html, body, #root, .app-root {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ─── Icon buttons (no penpot native equivalent) ───────────────────────────── */
+button {
+  display: flex;
+  align-items: center;
+}
 
 .btn-icon {
   display: inline-flex;
@@ -382,6 +386,7 @@ html, body, #root, .app-root {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  width: 100%;
 }
 
 .component-check {
@@ -490,7 +495,7 @@ html, body, #root, .app-root {
 /* Left nav icons */
 /* Slide list column */
 .manager-slide-list {
-  width: 80px;
+  width: 100px;
   flex-shrink: 0;
   border-right: 1px solid var(--background-quaternary);
   display: flex;
@@ -704,7 +709,7 @@ html, body, #root, .app-root {
 
 /* Right panel */
 .manager-right-panel {
-  width: 216px;
+  width: 230px;
   flex-shrink: 0;
   border-left: 1px solid var(--background-quaternary);
   display: flex;
