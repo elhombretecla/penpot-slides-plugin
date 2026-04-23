@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide } from '../types';
+import { fillsToCss, firstFillColor } from '../utils';
 
 export default function SlideList() {
   const slides = useSlideStore((s) => s.slides);
@@ -146,7 +147,10 @@ function flattenLeaves(
     const absX = offsetX + n.x;
     const absY = offsetY + n.y;
     if (n.type === 'group') {
-      if (n.clipContent && n.fill) {
+      // Emit a background rect for clipped groups whose fills resolve to
+      // something renderable (solid, gradient or multi-fill stack).
+      const hasFillsBg = n.clipContent && (fillsToCss(n.fills) ?? n.fill);
+      if (hasFillsBg) {
         out.push({ ...n, absX, absY });
       }
       if (n.children && n.children.length > 0) {
@@ -203,13 +207,16 @@ function SlideThumbnail({ slide }: { slide: Slide }) {
                 className="slide-thumb-node"
                 style={{
                   ...baseStyle,
-                  color: node.fontColor ?? '#ffffff',
+                  color: firstFillColor(node.fills) ?? node.fontColor ?? '#ffffff',
                   fontSize: node.fontSize ?? 16,
                   fontWeight: node.fontWeight ?? '400',
+                  fontFamily: node.fontFamily ?? 'sans-serif',
                   textAlign: node.textAlign ?? 'left',
+                  lineHeight: node.lineHeight ?? 1.4,
+                  letterSpacing: node.letterSpacing ? `${node.letterSpacing}px` : undefined,
                   overflow: 'hidden',
                   wordBreak: 'break-word',
-                  lineHeight: 1.2,
+                  whiteSpace: 'pre-wrap',
                 }}
               >
                 {node.text}
@@ -235,19 +242,25 @@ function SlideThumbnail({ slide }: { slide: Slide }) {
                 className="slide-thumb-node"
                 style={{
                   ...baseStyle,
-                  background: node.fill ?? 'rgba(100,87,240,0.2)',
+                  background: fillsToCss(node.fills) ?? node.fill ?? 'rgba(100,87,240,0.2)',
                 }}
               />
             );
           }
 
+          const nodeBg = fillsToCss(node.fills) ?? node.fill ?? '#6457f0';
+          const stroke =
+            node.strokeColor && node.strokeWidth
+              ? `${node.strokeWidth}px solid ${node.strokeColor}`
+              : undefined;
           return (
             <div
               key={node.id}
               className="slide-thumb-node"
               style={{
                 ...baseStyle,
-                background: node.fill ?? '#6457f0',
+                background: nodeBg,
+                border: stroke,
                 borderRadius: node.type === 'ellipse' ? '50%' : (node.borderRadius ?? 0),
               }}
             />
@@ -260,7 +273,7 @@ function SlideThumbnail({ slide }: { slide: Slide }) {
   return (
     <div
       className="slide-thumb"
-      style={{ background: slide.background }}
+      style={{ background: fillsToCss(slide.backgroundFills) ?? slide.background }}
     >
       {thumbContent()}
     </div>
