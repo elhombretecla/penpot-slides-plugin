@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide } from '../types';
-import { fillsToCss, firstFillColor, fontFamilyCss } from '../utils';
+import { fillsToCss, textNodeCss } from '../utils';
 
 export default function SlideList() {
   const slides = useSlideStore((s) => s.slides);
@@ -10,6 +10,7 @@ export default function SlideList() {
   const deleteSlide = useSlideStore((s) => s.deleteSlide);
   const duplicateSlide = useSlideStore((s) => s.duplicateSlide);
   const reorderSlides = useSlideStore((s) => s.reorderSlides);
+  const commitHistory = useSlideStore((s) => s.commitHistory);
 
   // React state (not refs) so the indicator line and drag-ghost styles can
   // re-render in response to the gesture.
@@ -54,7 +55,10 @@ export default function SlideList() {
       // Array-move semantics: splice-remove shifts downstream indices by -1,
       // so an insert point past the source needs to subtract 1.
       const to = insertAt > dragIndex ? insertAt - 1 : insertAt;
-      if (to !== dragIndex) reorderSlides(dragIndex, to);
+      if (to !== dragIndex) {
+        commitHistory();
+        reorderSlides(dragIndex, to);
+      }
     }
     setDragIndex(null);
     setInsertAt(null);
@@ -83,8 +87,14 @@ export default function SlideList() {
           showIndicatorAbove={insertAt === idx && dragIndex !== null && dragIndex !== idx && dragIndex !== idx - 1}
           showIndicatorBelow={insertAt === idx + 1 && dragIndex !== null && dragIndex !== idx && dragIndex !== idx + 1}
           onSelect={() => setActiveSlide(slide.id)}
-          onDelete={() => deleteSlide(slide.id)}
-          onDuplicate={() => duplicateSlide(slide.id)}
+          onDelete={() => {
+            commitHistory();
+            deleteSlide(slide.id);
+          }}
+          onDuplicate={() => {
+            commitHistory();
+            duplicateSlide(slide.id);
+          }}
           onDragStart={(e) => handleDragStart(idx, e)}
           onDragOver={(e) => handleDragOverItem(e, idx)}
           onDragEnd={handleDragEnd}
@@ -126,6 +136,7 @@ function SlideItem({
   onDragEnd,
 }: SlideItemProps) {
   const updateSlide = useSlideStore((s) => s.updateSlide);
+  const commitHistoryCoalesced = useSlideStore((s) => s.commitHistoryCoalesced);
 
   const className =
     `slide-item${isActive ? ' active' : ''}${isDragging ? ' is-dragging' : ''}`;
@@ -180,7 +191,10 @@ function SlideItem({
         <input
           className="slide-name-input"
           value={slide.name}
-          onChange={(e) => updateSlide(slide.id, { name: e.target.value })}
+          onChange={(e) => {
+            commitHistoryCoalesced(`slide:${slide.id}:name`);
+            updateSlide(slide.id, { name: e.target.value });
+          }}
           onClick={(e) => e.stopPropagation()}
         />
       )}
@@ -263,16 +277,10 @@ function SlideThumbnail({ slide }: { slide: Slide }) {
                 className="slide-thumb-node"
                 style={{
                   ...baseStyle,
-                  color: firstFillColor(node.fills) ?? node.fontColor ?? '#ffffff',
-                  fontSize: node.fontSize ?? 16,
-                  fontWeight: node.fontWeight ?? '400',
-                  fontFamily: fontFamilyCss(node.fontFamily),
-                  textAlign: node.textAlign ?? 'left',
-                  lineHeight: node.lineHeight ?? 1.4,
-                  letterSpacing: node.letterSpacing ? `${node.letterSpacing}px` : undefined,
-                  overflow: 'hidden',
-                  wordBreak: 'break-word',
-                  whiteSpace: 'pre-wrap',
+                  ...textNodeCss(node, 1),
+                  // baseStyle carries the box; textNodeCss assumes 100%.
+                  width: node.width,
+                  height: node.height,
                 }}
               >
                 {node.text}

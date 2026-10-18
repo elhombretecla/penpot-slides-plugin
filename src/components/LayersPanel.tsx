@@ -9,6 +9,7 @@ export default function LayersPanel({ slide }: Props) {
   const updateNode = useSlideStore((s) => s.updateNode);
   const deleteNode = useSlideStore((s) => s.deleteNode);
   const reorderNode = useSlideStore((s) => s.reorderNode);
+  const commitHistory = useSlideStore((s) => s.commitHistory);
 
   if (!slide) {
     return (
@@ -37,9 +38,20 @@ export default function LayersPanel({ slide }: Props) {
               slideId={slide.id}
               selectedNodeIds={selectedNodeIds}
               onSelect={selectNode}
-              onToggleVisibility={(id, visible) => updateNode(slide.id, id, { visible })}
-              onDelete={(id) => deleteNode(slide.id, id)}
-              onReorder={(id, dir) => reorderNode(slide.id, id, dir)}
+              onToggleVisibility={(id, visible) => {
+                commitHistory();
+                updateNode(slide.id, id, { visible });
+              }}
+              onDelete={(id) => {
+                commitHistory();
+                deleteNode(slide.id, id);
+              }}
+              // The list shows the front-most layer first, so "up" in the
+              // panel means one step towards the front of the stack.
+              onReorder={(id, dir) => {
+                commitHistory();
+                reorderNode(slide.id, id, dir === 'up' ? 'forward' : 'backward');
+              }}
               isFirstSibling={idx === 0}
               isLastSibling={idx === topLevel.length - 1}
             />

@@ -3,10 +3,11 @@ import type {
   PluginMessage,
   Slide,
   SlideNode,
+  CopyStateEntry,
   ExportSettings,
   ImportItemRequest,
 } from './types';
-import type { Fill, Stroke } from '@penpot/plugin-types';
+import type { Board, Fill, Shape, Stroke, Text } from '@penpot/plugin-types';
 
 // Open the plugin UI at a comfortable size for a slide builder
 penpot.ui.open('Slide Builder', `?theme=${penpot.theme}`, {
@@ -22,13 +23,13 @@ penpot.ui.onMessage<UIMessage>((message) => {
       handleGetLibraries();
       break;
     case 'get-components':
-      handleGetComponents(message.libraryId);
+      void handleGetComponents(message.requestId, message.libraryId, message.knownThumbnailIds);
       break;
     case 'import-components':
-      handleImportComponents(message.requestId, message.items);
+      void handleImportComponents(message.requestId, message.items);
       break;
     case 'insert-into-canvas':
-      handleInsertIntoCanvas(message.slides, message.settings);
+      void handleInsertIntoCanvas(message.slides, message.settings);
       break;
     case 'resize':
       penpot.ui.resize(message.width, message.height);
@@ -39,25 +40,41 @@ penpot.ui.onMessage<UIMessage>((message) => {
 // ─── Theme Change ─────────────────────────────────────────────────────────────
 
 penpot.on('themechange', (theme) => {
-  const msg: PluginMessage = { type: 'theme', theme };
-  penpot.ui.sendMessage(msg);
+  send({ type: 'theme', theme });
 });
 
 // ─── Library Handlers ─────────────────────────────────────────────────────────
+
+function allLibraries() {
+  return [penpot.library.local, ...penpot.library.connected];
+}
+
+function findLibraryComponent(libraryId: string | undefined, componentId: string | undefined) {
+  if (!componentId) return null;
+  // Prefer the declared library, but fall back to any library holding the id:
+  // a template opened from the library file itself reports it as "local".
+  const libs = allLibraries();
+  const preferred = libs.find((l) => l.id === libraryId);
+  const ordered = preferred ? [preferred, ...libs.filter((l) => l !== preferred)] : libs;
+  for (const lib of ordered) {
+    const comp = lib.components.find((c) => c.id === componentId);
+    if (comp) return { lib, comp };
+  }
+  return null;
+}
 
 function handleGetLibraries() {
   try {
     const local = penpot.library.local;
     const connected = penpot.library.connected;
 
-    // Only include connected libraries that are actually enabled in the file's
-    // Assets panel — those will have their components accessible (length > 0).
-    // Also deduplicate: skip any entry whose id matches the local library.
+    // `connected` can also list the file's own library — skip it, it is
+    // already represented by `local`.
     const connectedEnabled = connected.filter(
       (lib) => lib.id !== local.id && lib.components.length > 0
     );
 
-    const allLibraries = [
+    const libraries = [
       {
         id: local.id,
         name: `${local.name} (Local)`,
@@ -68,29 +85,30 @@ function handleGetLibraries() {
         name: lib.name,
         numComponents: lib.components.length,
       })),
-    ];
+    ].filter((lib) => lib.numComponents > 0);
 
-    // Only surface libraries that have at least one component to use as a template.
-    const libraries = allLibraries.filter((lib) => lib.numComponents > 0);
-
-    const msg: PluginMessage = { type: 'libraries', libraries };
-    penpot.ui.sendMessage(msg);
+    send({ type: 'libraries', libraries });
   } catch (err) {
-    sendError('Failed to load libraries: ' + String(err));
+    sendError('Failed to load libraries: ' + stringifyErr(err));
   }
 }
 
-async function handleGetComponents(libraryId: string) {
-  try {
-    const allLibs = [penpot.library.local, ...penpot.library.connected];
-    const lib = allLibs.find((l) => l.id === libraryId);
+// Thumbnails go through Penpot's exporter, which is server-side and slow
+// (seconds per component), so the job is cancellable: a newer request for any
+// library supersedes the running one.
+const THUMBNAIL_WIDTH = 320;
+const THUMBNAIL_CONCURRENCY = 3;
+let activeThumbnailRequest: string | null = null;
 
+async function handleGetComponents(requestId: string, libraryId: string, knownThumbnailIds: string[]) {
+  activeThumbnailRequest = requestId;
+  try {
+    const lib = allLibraries().find((l) => l.id === libraryId);
     if (!lib) {
       sendError(`Library not found: ${libraryId}`);
       return;
     }
 
-    // Collect base info synchronously and send immediately so the UI can render
     const components = lib.components.map((comp) => {
       let width: number | undefined;
       let height: number | undefined;
@@ -101,48 +119,52 @@ async function handleGetComponents(libraryId: string) {
           height = main.height;
         }
       } catch {
-        // mainInstance may not be available in all contexts
+        // The main instance may be unavailable (e.g. not loaded yet); the
+        // card simply shows no size.
       }
-      return {
-        id: comp.id,
-        libraryId,
-        name: comp.name,
-        path: comp.path ?? '',
-        width,
-        height,
-      };
+      return { id: comp.id, libraryId, name: comp.name, path: comp.path ?? '', width, height };
     });
 
-    // Send component list immediately — UI shows grid without waiting for thumbnails
-    const msg: PluginMessage = { type: 'components', libraryId, components };
-    penpot.ui.sendMessage(msg);
+    // Send the list immediately so the grid renders without waiting.
+    send({ type: 'components', requestId, libraryId, components });
 
-    // Export thumbnails one by one (sequential avoids overwhelming the runtime)
-    // and stream each result as it completes
-    for (const comp of lib.components) {
-      try {
-        const main = comp.mainInstance();
-        if (!main) continue;
-        const bytes = await main.export({ type: 'png', scale: 0.2 });
-        const thumbnail = `data:image/png;base64,${uint8ArrayToBase64(bytes)}`;
-        const thumbMsg: PluginMessage = { type: 'thumbnail', componentId: comp.id, thumbnail };
-        penpot.ui.sendMessage(thumbMsg);
-      } catch {
-        // Skip components whose main instance can't be exported
+    const known = new Set(knownThumbnailIds);
+    const queue = lib.components.filter((c) => !known.has(c.id));
+    const worker = async () => {
+      while (queue.length > 0 && activeThumbnailRequest === requestId) {
+        const comp = queue.shift()!;
+        try {
+          const main = comp.mainInstance();
+          if (!main) continue;
+          const scale = Math.min(1, THUMBNAIL_WIDTH / Math.max(1, main.width));
+          const bytes = await main.export({ type: 'png', scale });
+          if (activeThumbnailRequest !== requestId) return;
+          send({
+            type: 'thumbnail',
+            requestId,
+            componentId: comp.id,
+            thumbnail: `data:image/png;base64,${uint8ArrayToBase64(bytes)}`,
+          });
+        } catch {
+          // No thumbnail for this component — the card falls back to a
+          // placeholder once `thumbnails-complete` arrives.
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: THUMBNAIL_CONCURRENCY }, worker));
 
-    // Signal that all thumbnail exports are done (clears pending spinners)
-    const doneMsg: PluginMessage = { type: 'thumbnails-complete' };
-    penpot.ui.sendMessage(doneMsg);
+    if (activeThumbnailRequest === requestId) {
+      send({ type: 'thumbnails-complete', requestId });
+    }
   } catch (err) {
-    sendError('Failed to load components: ' + String(err));
+    sendError('Failed to load components: ' + stringifyErr(err));
   }
 }
 
-// Plain deep-clone helper for serialisable payloads (fills, strokes, etc.).
-// Used so the snapshots we send to the UI are independent of the live Penpot
-// shape and survive the postMessage structured-clone hop.
+// ─── Serialisation helpers ────────────────────────────────────────────────────
+
+// Plain deep-clone for serialisable payloads (fills, strokes…) so snapshots
+// are decoupled from the live Penpot shape and survive postMessage.
 function clonePlain<T>(value: T): T {
   try {
     return structuredClone(value);
@@ -155,46 +177,49 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 8192;
   for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    for (let j = 0; j < chunk.length; j++) {
-      binary += String.fromCharCode(chunk[j]);
-    }
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
   }
   return btoa(binary);
 }
 
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function stringifyErr(err: unknown): string {
+  if (err instanceof Error) return err.message || err.toString();
+  try {
+    return typeof err === 'string' ? err : JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 // ─── Component Import Pipeline ────────────────────────────────────────────────
 
-type AnyShape = ReturnType<typeof penpot.createBoard>['children'][number];
-
 async function handleImportComponents(requestId: string, items: ImportItemRequest[]) {
-  const startMsg: PluginMessage = {
-    type: 'import-start',
-    requestId,
-    total: items.length,
-  };
-  penpot.ui.sendMessage(startMsg);
+  send({ type: 'import-start', requestId, total: items.length });
 
   let success = 0;
   let failed = 0;
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-
-    const progressMsg: PluginMessage = {
+    send({
       type: 'import-progress',
       requestId,
       index: i,
       total: items.length,
       componentId: item.componentId,
       componentName: item.componentName,
-    };
-    penpot.ui.sendMessage(progressMsg);
+    });
 
     try {
       const result = await importSingleComponent(item);
-
-      const itemMsg: PluginMessage = {
+      send({
         type: 'import-item',
         requestId,
         componentId: item.componentId,
@@ -205,29 +230,22 @@ async function handleImportComponents(requestId: string, items: ImportItemReques
         backgroundFills: result.backgroundFills,
         width: result.width,
         height: result.height,
-      };
-      penpot.ui.sendMessage(itemMsg);
+        warnings: result.warnings,
+      });
       success++;
     } catch (err) {
       failed++;
-      const errMsg: PluginMessage = {
+      send({
         type: 'import-item-error',
         requestId,
         componentId: item.componentId,
         componentName: item.componentName,
         message: stringifyErr(err),
-      };
-      penpot.ui.sendMessage(errMsg);
+      });
     }
   }
 
-  const completeMsg: PluginMessage = {
-    type: 'import-complete',
-    requestId,
-    success,
-    failed,
-  };
-  penpot.ui.sendMessage(completeMsg);
+  send({ type: 'import-complete', requestId, success, failed });
 }
 
 interface ImportResult {
@@ -236,27 +254,29 @@ interface ImportResult {
   backgroundFills?: unknown[];
   width: number;
   height: number;
+  warnings: string[];
 }
 
-// Import a single component by reading its main instance (cheap) or, if that
-// fails, by creating a temporary off-canvas instance and cleaning it up. As a
-// last resort, fall back to a single full-size image node using the component
-// PNG export so the user always has something to work with.
-async function importSingleComponent(item: ImportItemRequest): Promise<ImportResult> {
-  const allLibs = [penpot.library.local, ...penpot.library.connected];
-  const lib = allLibs.find((l) => l.id === item.libraryId);
-  if (!lib) {
-    throw new Error(`Library not found (id ${item.libraryId}).`);
-  }
-  const comp = lib.components.find((c) => c.id === item.componentId);
-  if (!comp) {
-    throw new Error(`Component not found inside "${lib.name}".`);
-  }
+// Context threaded through the recursive importer.
+interface ImportContext {
+  // Component the slide comes from; nested shapes whose component is this one
+  // are template content, not nested instances.
+  rootComponentId: string;
+  warnings: string[];
+}
 
+// Import a component by reading its main instance (cheap, read-only) or, if
+// that fails, a temporary off-canvas instance that is removed afterwards. As
+// a last resort the whole component becomes a single image node.
+async function importSingleComponent(item: ImportItemRequest): Promise<ImportResult> {
+  const found = findLibraryComponent(item.libraryId, item.componentId);
+  if (!found) {
+    throw new Error(`Component "${item.componentName}" not found in any available library.`);
+  }
+  const { comp } = found;
   const errors: string[] = [];
 
-  // 1. Try mainInstance first — cheapest and does not mutate the document.
-  let main: AnyShape | null = null;
+  let main: Shape | null = null;
   try {
     main = comp.mainInstance() ?? null;
   } catch (err) {
@@ -271,15 +291,13 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
     }
   }
 
-  // 2. Fallback: create a temporary instance far off-canvas, read, remove.
-  let tempInstance: AnyShape | null = null;
+  let tempInstance: Shape | null = null;
   try {
     try {
       tempInstance = comp.instance() ?? null;
     } catch (err) {
       errors.push(`instance(): ${stringifyErr(err)}`);
     }
-
     if (tempInstance) {
       try {
         tempInstance.x = -100000;
@@ -293,22 +311,18 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
     if (tempInstance) {
       try {
         tempInstance.remove();
-      } catch {
-        // Leave it off-canvas if we cannot clean up.
+      } catch (err) {
+        errors.push(`remove temporary instance: ${stringifyErr(err)}`);
       }
     }
   }
 
-  // 3. Last-resort fallback: export the main instance (or a temp instance) as
-  //    a single PNG so the user can at least see the component inside the
-  //    plugin. Keeps position/size; children become non-editable.
   const snapshotRoot = main;
   if (snapshotRoot) {
     const imageUrl = await safeExportPng(snapshotRoot, 1);
     if (imageUrl) {
       const width = snapshotRoot.width ?? item.width ?? 1280;
       const height = snapshotRoot.height ?? item.height ?? 720;
-      const background = readBackground(snapshotRoot) ?? '#18181a';
       return {
         nodes: [
           {
@@ -326,85 +340,89 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
             sourceType: 'component-snapshot',
           },
         ],
-        background,
+        background: readBackground(snapshotRoot) ?? '#18181a',
         width,
         height,
+        warnings: [`"${item.componentName}" could only be imported as a flat image (${errors.join(' · ')}).`],
       };
     }
   }
 
-  throw new Error(
-    errors.length > 0
-      ? errors.join(' · ')
-      : 'Component could not be read from the library.'
-  );
+  throw new Error(errors.length > 0 ? errors.join(' · ') : 'Component could not be read from the library.');
 }
 
-async function buildResultFromRoot(
-  root: AnyShape,
-  item: ImportItemRequest
-): Promise<ImportResult> {
+async function buildResultFromRoot(root: Shape, item: ImportItemRequest): Promise<ImportResult> {
+  const ctx: ImportContext = { rootComponentId: item.componentId, warnings: [] };
   const width = root.width ?? item.width ?? 1280;
   const height = root.height ?? item.height ?? 720;
   const background = readBackground(root) ?? '#18181a';
   const backgroundFills = readFillsSnapshot(root);
-  const nodes = await importRootShape(root);
-  return { nodes, background, backgroundFills, width, height };
+  const nodes = await importRootShape(root, ctx);
+  return { nodes, background, backgroundFills, width, height, warnings: ctx.warnings };
 }
 
-// Read the content of a component root. If the root is a container (board /
-// group / boolean) with children, iterate them relative to the root origin.
-// If the root is a single shape (e.g. a text-only component) or has no
-// children, import the root itself as a single top-level leaf at (0,0).
-async function importRootShape(root: AnyShape): Promise<SlideNode[]> {
+// If the root is a container, its children become the slide's top-level
+// nodes (relative to the root origin). A single-shape component becomes one
+// leaf at (0,0).
+async function importRootShape(root: Shape, ctx: ImportContext): Promise<SlideNode[]> {
   const rootX = root.x ?? 0;
   const rootY = root.y ?? 0;
   const children = readChildren(root);
 
   if (children.length > 0) {
-    const out: SlideNode[] = [];
-    for (const child of children) {
-      try {
-        const node = await importShape(child, rootX, rootY);
-        if (node) out.push(node);
-      } catch {
-        // Skip children that fail to convert
-      }
-    }
-    return out;
+    return importChildren(children, rootX, rootY, ctx);
   }
 
-  try {
-    const node = await importShape(root, rootX, rootY);
-    if (!node) return [];
-    // Force the single-leaf root to (0,0) in slide coordinates.
-    return [{ ...node, x: 0, y: 0 }];
-  } catch {
-    return [];
-  }
+  const node = await importShapeSafe(root, rootX, rootY, ctx);
+  return node ? [{ ...node, x: 0, y: 0 }] : [];
 }
 
-function stringifyErr(err: unknown): string {
-  if (err instanceof Error) return err.message || err.toString();
-  try {
-    return typeof err === 'string' ? err : JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
-
-// Recursive importer: converts a Penpot shape (possibly containing other shapes)
-// into a SlideNode tree. Coordinates are stored relative to `parentX`/`parentY`
-// so groups keep their children logically nested.
-async function importShape(
-  shape: AnyShape,
+// Children keep Penpot's order (bottom → top), which is also the plugin's
+// model order: the last node paints in front.
+async function importChildren(
+  children: Shape[],
   parentX: number,
-  parentY: number
+  parentY: number,
+  ctx: ImportContext
+): Promise<SlideNode[]> {
+  const out: SlideNode[] = [];
+  for (const child of children) {
+    const node = await importShapeSafe(child, parentX, parentY, ctx);
+    if (node) out.push(node);
+  }
+  return out;
+}
+
+async function importShapeSafe(
+  shape: Shape,
+  parentX: number,
+  parentY: number,
+  ctx: ImportContext
 ): Promise<SlideNode | null> {
-  const absX = shape.x ?? 0;
-  const absY = shape.y ?? 0;
+  try {
+    return await importShape(shape, parentX, parentY, ctx);
+  } catch (err) {
+    ctx.warnings.push(`Skipped "${safeName(shape) ?? shape.type}": ${stringifyErr(err)}`);
+    return null;
+  }
+}
+
+// Recursive importer: converts a Penpot shape into a SlideNode tree.
+// Coordinates are relative to the parent and describe the UNROTATED box:
+// Penpot reports x/y of the rotated bounding box, so the origin is derived
+// from the centre. Rotation is applied around the centre both in the editor
+// (CSS) and on export (Penpot), so the shape lands exactly where it was.
+async function importShape(
+  shape: Shape,
+  parentX: number,
+  parentY: number,
+  ctx: ImportContext
+): Promise<SlideNode | null> {
   const width = shape.width ?? 0;
   const height = shape.height ?? 0;
+  const rotation = shape.rotation ?? 0;
+  const absX = rotation ? shape.center.x - width / 2 : shape.x ?? 0;
+  const absY = rotation ? shape.center.y - height / 2 : shape.y ?? 0;
 
   const base = {
     id: shape.id,
@@ -415,7 +433,7 @@ async function importShape(
     height,
     visible: !shape.hidden,
     opacity: shape.opacity ?? 1,
-    rotation: shape.rotation ?? 0,
+    rotation,
     sourceType: shape.type,
   };
 
@@ -423,96 +441,54 @@ async function importShape(
   const firstFill = fills[0];
   const fillColor = firstFill?.fillColor;
   const fillOpacity = firstFill?.fillOpacity ?? 1;
-  // Deep-clone the full array so gradients / image fills / multi-fills survive
-  // the postMessage round-trip and are decoupled from the live Penpot shape.
   const fillsSnapshot = fills.length > 0 ? clonePlain(fills) : undefined;
 
   const strokes = 'strokes' in shape && Array.isArray(shape.strokes) ? shape.strokes : [];
   const firstStroke = strokes[0];
-  const strokeColor = firstStroke?.strokeColor;
-  const strokeWidth = firstStroke?.strokeWidth;
   const strokesSnapshot = strokes.length > 0 ? clonePlain(strokes) : undefined;
 
-  // A component instance is typically a board that exposes a `component` ref.
-  // We treat it as a single editable block, keeping the link metadata so the
-  // user can re-apply it during export.
-  const componentRef = detectComponentInstance(shape);
+  // Nested component instance (e.g. a logo inside the template): keep it as
+  // a link so export re-instantiates the real component.
+  const componentRef = detectNestedInstance(shape, ctx.rootComponentId);
   if (componentRef) {
-    const imageUrl = await safeExportPng(shape, 0.5);
+    const svgMarkup = safeMarkup(shape);
     return {
       ...base,
       type: 'component-instance',
       libraryId: componentRef.libraryId,
       componentId: componentRef.componentId,
       componentName: componentRef.name,
-      imageUrl,
+      copyState: captureCopyState(shape),
+      svgMarkup,
+      imageUrl: svgMarkup ? svgDataUrl(svgMarkup) : await safeExportPng(shape, 0.5),
     };
   }
 
-  // Groups / boolean operations — keep the hierarchy so users can edit children.
-  if (shape.type === 'group' || shape.type === 'boolean') {
-    const children = readChildren(shape);
-    const nestedNodes: SlideNode[] = [];
-    for (const c of children) {
-      try {
-        const n = await importShape(c, absX, absY);
-        if (n) nestedNodes.push(n);
-      } catch {
-        // skip child
-      }
-    }
+  if (shape.type === 'group') {
     return {
       ...base,
       type: 'group',
-      children: nestedNodes,
+      children: await importChildren(readChildren(shape), absX, absY, ctx),
     };
   }
 
-  // Nested boards keep hierarchy but also carry a background fill.
+  // Nested boards keep hierarchy, clipping and their background.
   if (shape.type === 'board') {
-    const children = readChildren(shape);
-    const nestedNodes: SlideNode[] = [];
-    for (const c of children) {
-      try {
-        const n = await importShape(c, absX, absY);
-        if (n) nestedNodes.push(n);
-      } catch {
-        // skip child
-      }
-    }
     return {
       ...base,
       type: 'group',
-      clipContent: true,
+      clipContent: shape.clipContent,
+      borderRadius: shape.borderRadius ?? 0,
       fill: fillColor,
       fillOpacity,
       fills: fillsSnapshot,
-      children: nestedNodes,
+      strokes: strokesSnapshot,
+      children: await importChildren(readChildren(shape), absX, absY, ctx),
     };
   }
 
   if (shape.type === 'text') {
-    const textAlign =
-      shape.align !== 'mixed' && shape.align !== 'justify' && shape.align
-        ? (shape.align as 'left' | 'center' | 'right')
-        : 'left';
-
-    return {
-      ...base,
-      type: 'text',
-      text: shape.characters ?? '',
-      fontSize: shape.fontSize !== 'mixed' ? parseFloat(String(shape.fontSize)) || 16 : 16,
-      fontWeight: shape.fontWeight !== 'mixed' ? String(shape.fontWeight) : '400',
-      fontFamily: shape.fontFamily !== 'mixed' ? String(shape.fontFamily) : 'sans-serif',
-      fontColor: firstFill?.fillColor ?? '#ffffff',
-      textAlign,
-      lineHeight:
-        shape.lineHeight !== 'mixed' ? parseFloat(String(shape.lineHeight)) || 1.4 : 1.4,
-      letterSpacing:
-        shape.letterSpacing !== 'mixed' ? parseFloat(String(shape.letterSpacing)) || 0 : 0,
-      fills: fillsSnapshot,
-      strokes: strokesSnapshot,
-    };
+    return { ...base, type: 'text', ...readTextStyle(shape), fills: fillsSnapshot, strokes: strokesSnapshot };
   }
 
   if (shape.type === 'ellipse') {
@@ -521,8 +497,8 @@ async function importShape(
       type: 'ellipse',
       fill: fillColor ?? '#6457f0',
       fillOpacity,
-      strokeColor,
-      strokeWidth,
+      strokeColor: firstStroke?.strokeColor,
+      strokeWidth: firstStroke?.strokeWidth,
       fills: fillsSnapshot,
       strokes: strokesSnapshot,
     };
@@ -534,20 +510,19 @@ async function importShape(
       type: 'rect',
       fill: fillColor ?? '#6457f0',
       fillOpacity,
-      strokeColor,
-      strokeWidth,
-      borderRadius: ('borderRadius' in shape ? (shape.borderRadius as number) : 0) ?? 0,
+      strokeColor: firstStroke?.strokeColor,
+      strokeWidth: firstStroke?.strokeWidth,
+      borderRadius: shape.borderRadius ?? 0,
       fills: fillsSnapshot,
       strokes: strokesSnapshot,
     };
   }
 
   if (shape.type === 'image') {
-    const imageUrl = await safeExportPng(shape, 1);
     return {
       ...base,
       type: 'image',
-      imageUrl,
+      imageUrl: await safeExportPng(shape, 1),
       fill: fillColor,
       fillOpacity,
       fills: fillsSnapshot,
@@ -555,69 +530,135 @@ async function importShape(
     };
   }
 
-  if (shape.type === 'path' || shape.type === 'svg-raw') {
-    const imageUrl = await safeExportPng(shape, 1);
-    return {
-      ...base,
-      type: 'path',
-      imageUrl,
-      fill: fillColor,
-      fillOpacity,
-      strokeColor,
-      strokeWidth,
-      fills: fillsSnapshot,
-      strokes: strokesSnapshot,
-    };
-  }
-
-  // Unknown shape type — take a visual snapshot so nothing silently disappears.
-  const imageUrl = await safeExportPng(shape, 1);
+  // Paths, booleans, raw SVG and anything unknown: keep the vector source so
+  // export can rebuild real vectors. Raster export is only a fallback — and
+  // the only option when the vector carries an image fill: the markup then
+  // points at an authenticated asset URL that createShapeFromSvg can't load.
+  let svgMarkup = safeMarkup(shape);
+  if (svgMarkup && svgMarkup.includes('by-file-media-id')) svgMarkup = undefined;
+  // The markup already bakes the rotation in, so describe these nodes by
+  // their rotated bounding box with rotation 0 — otherwise they would be
+  // rotated twice (editor and export).
+  const bakedGeometry =
+    svgMarkup && rotation
+      ? {
+          x: shape.bounds.x - parentX,
+          y: shape.bounds.y - parentY,
+          width: shape.bounds.width,
+          height: shape.bounds.height,
+          rotation: 0,
+        }
+      : {};
   return {
     ...base,
+    ...bakedGeometry,
     type: 'path',
-    imageUrl,
+    svgMarkup,
+    imageUrl: svgMarkup ? svgDataUrl(svgMarkup) : await safeExportPng(shape, 1),
     fill: fillColor,
     fillOpacity,
+    strokeColor: firstStroke?.strokeColor,
+    strokeWidth: firstStroke?.strokeWidth,
     fills: fillsSnapshot,
     strokes: strokesSnapshot,
   };
 }
 
-function detectComponentInstance(
-  shape: AnyShape
-): { libraryId?: string; componentId?: string; name?: string } | null {
-  try {
-    const anyShape = shape as unknown as {
-      component?: { libraryId?: string; id?: string; name?: string };
-      mainComponent?: { libraryId?: string; id?: string; name?: string };
-      isComponentInstance?: boolean;
-      componentId?: string;
-      libraryId?: string;
-      componentRefId?: string;
-    };
-    const linked = anyShape.component ?? anyShape.mainComponent;
-    if (linked && (linked.id || linked.libraryId)) {
-      return {
-        libraryId: linked.libraryId,
-        componentId: linked.id,
-        name: linked.name ?? safeName(shape),
-      };
-    }
-    if (anyShape.isComponentInstance && anyShape.componentId) {
-      return {
-        libraryId: anyShape.libraryId,
-        componentId: anyShape.componentId,
-        name: safeName(shape),
-      };
-    }
-  } catch {
-    // Some Penpot shapes expose these as getters that throw when not
-    // "mounted" (e.g. on library main instances). Treat as not-an-instance.
-  }
-  return null;
+// Text properties may be 'mixed' when the text has several style runs. In
+// that case the first character's style is used instead of hard-coded
+// defaults, so at least the dominant opening style survives.
+function readTextStyle(text: Text): Partial<SlideNode> {
+  let first: ReturnType<Text['getRange']> | null = null;
+  const firstRange = () => {
+    if (!first && text.characters.length > 0) first = text.getRange(0, 1);
+    return first;
+  };
+  const pick = <T>(value: T | 'mixed', fromRange: () => T | 'mixed' | undefined): T | undefined => {
+    if (value !== 'mixed') return value;
+    const v = fromRange();
+    return v === 'mixed' ? undefined : v;
+  };
+  const num = (value: string | undefined, fallback: number) => {
+    const n = value != null ? parseFloat(value) : NaN;
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const align = pick(text.align, () => firstRange()?.align);
+  const fontStyle = pick(text.fontStyle, () => firstRange()?.fontStyle);
+  const textTransform = pick(text.textTransform, () => firstRange()?.textTransform);
+  const textDecoration = pick(text.textDecoration, () => firstRange()?.textDecoration);
+  const verticalAlign = text.verticalAlign;
+  const fills = pick(text.fills, () => firstRange()?.fills);
+  const firstFillColor = Array.isArray(fills) ? fills[0]?.fillColor : undefined;
+
+  return {
+    text: text.characters ?? '',
+    fontId: pick(text.fontId, () => firstRange()?.fontId),
+    fontFamily: pick(text.fontFamily, () => firstRange()?.fontFamily) ?? 'sourcesanspro',
+    fontVariantId: pick(text.fontVariantId, () => firstRange()?.fontVariantId),
+    fontSize: num(pick(text.fontSize, () => firstRange()?.fontSize), 14),
+    fontWeight: pick(text.fontWeight, () => firstRange()?.fontWeight) ?? '400',
+    fontStyle: fontStyle === 'italic' ? 'italic' : 'normal',
+    lineHeight: num(pick(text.lineHeight, () => firstRange()?.lineHeight), 1.2),
+    letterSpacing: num(pick(text.letterSpacing, () => firstRange()?.letterSpacing), 0),
+    textAlign: align === 'center' || align === 'right' ? align : 'left',
+    textTransform:
+      textTransform === 'uppercase' || textTransform === 'lowercase' || textTransform === 'capitalize'
+        ? textTransform
+        : undefined,
+    textDecoration:
+      textDecoration === 'underline' || textDecoration === 'line-through' ? textDecoration : undefined,
+    verticalAlign: verticalAlign === 'center' || verticalAlign === 'bottom' ? verticalAlign : 'top',
+    growType: text.growType,
+    fontColor: firstFillColor ?? '#000000',
+  };
 }
 
-function safeName(shape: AnyShape): string | undefined {
+// A nested instance is the head of a component copy whose component is not
+// the slide template itself. (`component` / `componentHead` are methods in
+// the Plugin API — reading them as properties never matches.)
+function detectNestedInstance(
+  shape: Shape,
+  rootComponentId: string
+): { libraryId: string; componentId: string; name: string } | null {
+  try {
+    if (!shape.isComponentInstance()) return null;
+    if (shape.componentHead()?.id !== shape.id) return null;
+    const comp = shape.component();
+    if (!comp || comp.id === rootComponentId) return null;
+    return { libraryId: comp.libraryId, componentId: comp.id, name: comp.name };
+  } catch {
+    // Shapes outside the current page may throw on component lookups; treat
+    // them as plain shapes.
+    return null;
+  }
+}
+
+// Depth-first snapshot of a component copy's descendants: geometry relative
+// to the copy root plus the properties templates usually override.
+function captureCopyState(root: Shape): CopyStateEntry[] {
+  const out: CopyStateEntry[] = [];
+  const visit = (parent: Shape) => {
+    for (const child of readChildren(parent)) {
+      out.push({
+        dx: child.x - root.x,
+        dy: child.y - root.y,
+        width: child.width,
+        height: child.height,
+        rotated: !!child.rotation,
+        hidden: !!child.hidden,
+        fills: Array.isArray(child.fills) ? clonePlain(child.fills) : undefined,
+        strokes: Array.isArray(child.strokes) ? clonePlain(child.strokes) : undefined,
+        characters: child.type === 'text' ? child.characters : undefined,
+      });
+      visit(child);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+function safeName(shape: Shape): string | undefined {
   try {
     return shape.name ?? undefined;
   } catch {
@@ -625,63 +666,58 @@ function safeName(shape: AnyShape): string | undefined {
   }
 }
 
-async function safeExportPng(shape: AnyShape, scale: number): Promise<string | undefined> {
+// Client-side SVG of a shape (~50 ms, no server round-trip). Text inside the
+// markup is only present when the shape lives on the current page, which is
+// fine here: it is used for vectors, not for text.
+function safeMarkup(shape: Shape): string | undefined {
   try {
-    if (!('export' in shape) || typeof (shape as { export?: unknown }).export !== 'function') {
-      return undefined;
-    }
-    const bytes = await (
-      shape as unknown as {
-        export: (opts: { type: 'png'; scale: number }) => Promise<Uint8Array>;
-      }
-    ).export({ type: 'png', scale });
+    const svg = penpot.generateMarkup([shape], { type: 'svg' });
+    return svg && svg.includes('<svg') ? svg : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Percent-encoding instead of base64: no TextEncoder needed in the sandbox.
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+// Server-side raster export — slow (seconds), used only as a fallback.
+async function safeExportPng(shape: Shape, scale: number): Promise<string | undefined> {
+  try {
+    const bytes = await shape.export({ type: 'png', scale });
     return `data:image/png;base64,${uint8ArrayToBase64(bytes)}`;
   } catch {
     return undefined;
   }
 }
 
-function readChildren(shape: unknown): AnyShape[] {
-  if (!shape || typeof shape !== 'object') return [];
+function readChildren(shape: Shape): Shape[] {
   try {
-    const c = (shape as { children?: unknown }).children;
-    if (!c) return [];
-    if (Array.isArray(c)) return c as AnyShape[];
-    // Some implementations expose `children` as an iterable / live list.
-    try {
-      return Array.from(c as Iterable<AnyShape>);
-    } catch {
-      return [];
-    }
+    return 'children' in shape && Array.isArray(shape.children) ? shape.children : [];
   } catch {
-    // Accessing `.children` may throw on certain shapes; treat as no children.
+    // Accessing `.children` may throw on certain shapes; treat as leaf.
     return [];
   }
 }
 
-function readBackground(shape: unknown): string | null {
-  if (!shape || typeof shape !== 'object') return null;
+function readBackground(shape: Shape): string | null {
   try {
-    const fills = (shape as { fills?: unknown }).fills;
-    if (Array.isArray(fills) && fills.length > 0) {
-      const fill = fills[0] as { fillColor?: string };
-      if (fill && typeof fill.fillColor === 'string') return fill.fillColor;
-    }
+    const fills = shape.fills;
+    if (Array.isArray(fills) && typeof fills[0]?.fillColor === 'string') return fills[0].fillColor;
   } catch {
-    // ignore
+    // Unreadable fills → caller uses its default background.
   }
   return null;
 }
 
-function readFillsSnapshot(shape: unknown): unknown[] | undefined {
-  if (!shape || typeof shape !== 'object') return undefined;
+function readFillsSnapshot(shape: Shape): unknown[] | undefined {
   try {
-    const fills = (shape as { fills?: unknown }).fills;
-    if (Array.isArray(fills) && fills.length > 0) {
-      return clonePlain(fills);
-    }
+    const fills = shape.fills;
+    if (Array.isArray(fills) && fills.length > 0) return clonePlain(fills);
   } catch {
-    // ignore
+    // Unreadable fills → no snapshot, the flat background is used.
   }
   return undefined;
 }
@@ -690,170 +726,381 @@ function readFillsSnapshot(shape: unknown): unknown[] | undefined {
 
 const DECK_PADDING = 40;
 
-function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
+async function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
+  const warnings: string[] = [];
   try {
     if (slides.length === 0) {
-      const empty: PluginMessage = { type: 'insert-complete', count: 0 };
-      penpot.ui.sendMessage(empty);
+      send({ type: 'insert-complete', count: 0, warnings });
       return;
     }
 
+    if (settings.createNewPage) {
+      const page = penpot.createPage();
+      page.name = settings.slidePrefix ? `${settings.slidePrefix}s` : 'Slides';
+      // Shape creation always targets the active page.
+      await penpot.openPage(page);
+    }
+
     const gap = settings.spacing;
+    const totalWidth = slides.reduce((sum, s, i) => sum + s.width + (i > 0 ? gap : 0), 0);
+    const maxHeight = Math.max(...slides.map((s) => s.height));
+    const center = penpot.viewport.center;
 
-    // Pre-compute deck bounds so the wrapper centers on the viewport before
-    // flex layout takes over. Flex will then arrange the slides inside.
-    const slidesWidthSum = slides.reduce(
-      (sum, s, i) => sum + s.width + (i > 0 ? gap : 0),
-      0
-    );
-    const maxSlideHeight = Math.max(...slides.map((s) => s.height));
-    const deckWidth = slidesWidthSum + DECK_PADDING * 2;
-    const deckHeight = maxSlideHeight + DECK_PADDING * 2;
+    const boards: Board[] = [];
+    let deck: Board | null = null;
 
-    const deck = penpot.createBoard();
-    deck.name = 'Slides deck';
-    deck.x = penpot.viewport.center.x - deckWidth / 2;
-    deck.y = penpot.viewport.center.y - deckHeight / 2;
-    deck.resize(deckWidth, deckHeight);
-    // Transparent wrapper — the deck is a layout container, not a visual slide.
-    deck.fills = [];
-    // "Fit content horizontally" on the board itself (Board.horizontalSizing
-    // in the Penpot API — 'auto' = hug content, 'fix' = keep intrinsic size).
-    // With this on, the deck stays tight around the slides even after the
-    // user adds or removes boards.
-    deck.horizontalSizing = 'auto';
-    // Don't clip overflow — the deck is a wrapper, not a viewport. Anything
-    // that bleeds outside (shadows, decorative elements) should stay visible.
-    deck.clipContent = false;
+    if (settings.wrapInDeck) {
+      deck = createDeck(totalWidth, maxHeight, gap, center);
+    }
 
-    const flex = deck.addFlexLayout();
-    flex.dir = 'row';
-    flex.wrap = 'nowrap';
-    flex.alignItems = 'start';
-    flex.justifyContent = 'start';
-    flex.topPadding = DECK_PADDING;
-    flex.rightPadding = DECK_PADDING;
-    flex.bottomPadding = DECK_PADDING;
-    flex.leftPadding = DECK_PADDING;
-    flex.rowGap = gap;
-    flex.columnGap = gap;
-
-    const insertedBoards: ReturnType<typeof penpot.createBoard>[] = [];
+    let cursorX = center.x - totalWidth / 2;
+    const topY = center.y - maxHeight / 2;
 
     for (let i = 0; i < slides.length; i++) {
       const slide = slides[i];
-      const slideName = `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
+      const name = `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
+      const board = createBoardForSlide(slide, name);
 
-      // Placeholder x/y — flex layout assigns the real position when the
-      // board is appended to the deck below.
-      const board = createBoardForSlide(slide, 0, 0, slideName);
-      deck.appendChild(board);
-
-      // Keep each slide at its configured size; without this flex could try
-      // to grow/shrink boards to fit the container.
-      const layoutChild = (board as { layoutChild?: { horizontalSizing: 'auto' | 'fill' | 'fix'; verticalSizing: 'auto' | 'fill' | 'fix' } }).layoutChild;
-      if (layoutChild) {
-        layoutChild.horizontalSizing = 'fix';
-        layoutChild.verticalSizing = 'fix';
-      }
-
-      if (
-        slide.source === 'library-component' &&
-        slide.libraryId &&
-        slide.componentId &&
-        slide.nodes.length === 0
-      ) {
-        // Library-linked slide without imported nodes: insert as a component instance
-        try {
-          const allLibs = [penpot.library.local, ...penpot.library.connected];
-          const lib = allLibs.find((l) => l.id === slide.libraryId);
-          const comp = lib?.components.find((c) => c.id === slide.componentId);
-          if (comp) {
-            const instance = comp.instance();
-            // Penpot shape coordinates are absolute in the canvas; use the
-            // board's post-flex absolute position as the instance origin.
-            instance.x = board.x;
-            instance.y = board.y;
-            board.appendChild(instance);
-          }
-        } catch {
-          // If component instantiation fails, leave the board empty
+      if (deck) {
+        // Flex assigns the real position; keep each slide at its own size.
+        deck.appendChild(board);
+        if (board.layoutChild) {
+          board.layoutChild.horizontalSizing = 'fix';
+          board.layoutChild.verticalSizing = 'fix';
         }
       } else {
-        // SlideNode coordinates are slide-relative; Penpot shape coordinates
-        // are absolute in the canvas — offset by the board's (flex-assigned)
-        // absolute position so children land inside the board.
-        populateBoardWithNodes(board, slide.nodes, board.x, board.y);
+        board.x = cursorX;
+        board.y = topY;
+        cursorX += slide.width + gap;
       }
 
-      insertedBoards.push(board);
-    }
-
-    if (settings.groupIntoSection) {
       try {
-        penpot.selection = [deck];
-      } catch {
-        // Selection may not be available in all contexts
+        await populateSlide(board, slide, warnings);
+      } catch (err) {
+        warnings.push(`${name}: ${stringifyErr(err)}`);
       }
+      boards.push(board);
     }
 
-    const msg: PluginMessage = { type: 'insert-complete', count: insertedBoards.length };
-    penpot.ui.sendMessage(msg);
+    try {
+      penpot.selection = deck ? [deck] : boards;
+    } catch {
+      // Selection is cosmetic; ignore if unavailable.
+    }
+
+    send({ type: 'insert-complete', count: boards.length, warnings: dedupe(warnings) });
   } catch (err) {
-    sendError('Failed to insert slides: ' + String(err));
+    sendError('Failed to insert slides: ' + stringifyErr(err));
   }
 }
 
-function createBoardForSlide(
-  slide: Slide,
-  x: number,
-  y: number,
-  name: string
-): ReturnType<typeof penpot.createBoard> {
+function createDeck(totalWidth: number, maxHeight: number, gap: number, center: { x: number; y: number }): Board {
+  const deckWidth = totalWidth + DECK_PADDING * 2;
+  const deckHeight = maxHeight + DECK_PADDING * 2;
+
+  const deck = penpot.createBoard();
+  deck.name = 'Slides deck';
+  deck.x = center.x - deckWidth / 2;
+  deck.y = center.y - deckHeight / 2;
+  deck.resize(deckWidth, deckHeight);
+  // Transparent wrapper that hugs its content and never clips the slides.
+  deck.fills = [];
+  deck.horizontalSizing = 'auto';
+  deck.clipContent = false;
+
+  const flex = deck.addFlexLayout();
+  flex.dir = 'row';
+  flex.wrap = 'nowrap';
+  flex.alignItems = 'start';
+  flex.justifyContent = 'start';
+  flex.topPadding = DECK_PADDING;
+  flex.rightPadding = DECK_PADDING;
+  flex.bottomPadding = DECK_PADDING;
+  flex.leftPadding = DECK_PADDING;
+  flex.rowGap = gap;
+  flex.columnGap = gap;
+  return deck;
+}
+
+function createBoardForSlide(slide: Slide, name: string): Board {
   const board = penpot.createBoard();
   board.name = name;
-  board.x = x;
-  board.y = y;
   board.resize(slide.width, slide.height);
   board.clipContent = true;
 
-  // Prefer the full fills snapshot captured at import time — keeps gradients,
-  // image fills, multi-fill stacks and per-fill opacities. Fall back to the
-  // flat hex background for slides created from scratch in the plugin.
-  if (slide.backgroundFills && slide.backgroundFills.length > 0) {
-    board.fills = clonePlain(slide.backgroundFills) as Fill[];
-  } else {
-    board.fills = [
-      {
-        fillColor: slide.background,
-        fillOpacity: 1,
-      },
-    ];
-  }
-
+  // Full fills snapshot first (gradients, images, linked library colors);
+  // the flat hex is only for slides created from scratch.
+  board.fills =
+    slide.backgroundFills && slide.backgroundFills.length > 0
+      ? (clonePlain(slide.backgroundFills) as Fill[])
+      : [{ fillColor: slide.background, fillOpacity: 1 }];
   return board;
 }
 
-// Apply the full fills/strokes snapshots when available; otherwise synthesise
-// a single solid fill / stroke from the flat convenience fields so nodes
-// created from scratch in the plugin UI still render correctly.
-// `text.fills` can be `'mixed'` in the getter but accepts a `Fill[]` on write,
-// so the parameter type widens to accommodate both rect/ellipse and text.
-function applyFillsAndStrokes(
-  shape: {
-    fills: Fill[] | 'mixed';
-    strokes: Stroke[] | 'mixed';
-  },
+async function populateSlide(board: Board, slide: Slide, warnings: string[]) {
+  // Library slide without extracted nodes: drop in a linked instance.
+  if (slide.source === 'library-component' && slide.nodes.length === 0) {
+    const found = findLibraryComponent(slide.libraryId, slide.componentId);
+    if (!found) {
+      warnings.push(`"${slide.name}": template component not found — the slide is empty.`);
+      return;
+    }
+    const instance = found.comp.instance();
+    board.appendChild(instance);
+    instance.x = board.x;
+    instance.y = board.y;
+    return;
+  }
+
+  // SlideNode coordinates are slide-relative; Penpot coordinates are
+  // absolute, so offset by the board's (post-layout) position.
+  await populateNodes(board, slide.nodes, board.x, board.y, warnings);
+}
+
+// Recursive populator. Nodes are appended in model order (bottom → top):
+// Penpot's `appendChild` puts each new shape in front of the previous ones,
+// so the stacking order is preserved 1:1.
+async function populateNodes(
+  parent: Board,
+  nodes: SlideNode[],
+  offsetX: number,
+  offsetY: number,
+  warnings: string[]
+): Promise<Shape[]> {
+  const created: Shape[] = [];
+  for (const node of nodes) {
+    if (!node.visible) continue;
+    try {
+      const shape = await createShapeForNode(parent, node, offsetX + node.x, offsetY + node.y, warnings);
+      if (shape) created.push(shape);
+    } catch (err) {
+      warnings.push(`Could not create "${node.name}": ${stringifyErr(err)}`);
+    }
+  }
+  return created;
+}
+
+async function createShapeForNode(
+  parent: Board,
   node: SlideNode,
-  defaults: { fill: string; fillOpacity?: number }
+  absX: number,
+  absY: number,
+  warnings: string[]
+): Promise<Shape | null> {
+  switch (node.type) {
+    case 'group': {
+      // Nested boards come back as boards (clip + background), plain groups
+      // as Penpot groups.
+      if (node.clipContent !== undefined || (node.fills && node.fills.length > 0)) {
+        const inner = penpot.createBoard();
+        inner.name = node.name;
+        parent.appendChild(inner);
+        place(inner, node, absX, absY);
+        inner.clipContent = node.clipContent ?? false;
+        if (node.borderRadius) inner.borderRadius = node.borderRadius;
+        inner.fills = node.fills && node.fills.length > 0 ? (clonePlain(node.fills) as Fill[]) : [];
+        if (node.strokes?.length) inner.strokes = clonePlain(node.strokes) as Stroke[];
+        await populateNodes(inner, node.children ?? [], absX, absY, warnings);
+        return inner;
+      }
+      const children = await populateNodes(parent, node.children ?? [], absX, absY, warnings);
+      if (children.length === 0) return null;
+      const group = penpot.group(children);
+      if (!group) return null;
+      group.name = node.name;
+      group.opacity = node.opacity;
+      return group;
+    }
+
+    case 'text': {
+      const text = penpot.createText(node.text || ' ');
+      if (!text) return null;
+      text.name = node.name;
+      parent.appendChild(text);
+      applyTextStyle(text, node, warnings);
+      applyFillsAndStrokes(text, node, { fill: node.fontColor ?? '#000000' });
+      place(text, node, absX, absY);
+      // resize() forces growType 'fixed'; restore the template's behaviour.
+      if (node.growType && node.growType !== 'fixed') text.growType = node.growType;
+      return text;
+    }
+
+    case 'rect': {
+      const rect = penpot.createRectangle();
+      rect.name = node.name;
+      parent.appendChild(rect);
+      applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
+      if (node.borderRadius) rect.borderRadius = node.borderRadius;
+      place(rect, node, absX, absY);
+      return rect;
+    }
+
+    case 'ellipse': {
+      const ellipse = penpot.createEllipse();
+      ellipse.name = node.name;
+      parent.appendChild(ellipse);
+      applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
+      place(ellipse, node, absX, absY);
+      return ellipse;
+    }
+
+    case 'component-instance': {
+      const found = findLibraryComponent(node.libraryId, node.componentId);
+      if (found) {
+        const instance = found.comp.instance();
+        instance.name = node.name;
+        parent.appendChild(instance);
+        place(instance, node, absX, absY);
+        if (node.copyState) replayCopyState(instance, node.copyState, node.name, warnings);
+        return instance;
+      }
+      warnings.push(`Component "${node.componentName ?? node.name}" not found — inserted a detached copy.`);
+      return createVectorOrImage(parent, node, absX, absY, warnings);
+    }
+
+    case 'image':
+    case 'path':
+      return createVectorOrImage(parent, node, absX, absY, warnings);
+  }
+}
+
+// Re-apply a captured copy state onto a fresh instance of the same component
+// (same structure, same depth-first order). Only values that differ are
+// written, so untouched properties stay inherited from the main component.
+// Geometry is replayed too: resizing an instance root does not scale its
+// children, while the template's copy may be scaled.
+function replayCopyState(instance: Shape, state: CopyStateEntry[], name: string, warnings: string[]) {
+  const targets: Shape[] = [];
+  const visit = (parent: Shape) => {
+    for (const child of readChildren(parent)) {
+      targets.push(child);
+      visit(child);
+    }
+  };
+  visit(instance);
+  if (targets.length !== state.length) {
+    warnings.push(`"${name}": the component changed since import — its overrides were not re-applied.`);
+    return;
+  }
+
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  targets.forEach((target, i) => {
+    const entry = state[i];
+    if (!entry.rotated && !target.rotation) {
+      if (Math.abs(target.width - entry.width) > 0.5 || Math.abs(target.height - entry.height) > 0.5) {
+        target.resize(Math.max(0.01, entry.width), Math.max(0.01, entry.height));
+      }
+      const x = instance.x + entry.dx;
+      const y = instance.y + entry.dy;
+      if (Math.abs(target.x - x) > 0.5) target.x = x;
+      if (Math.abs(target.y - y) > 0.5) target.y = y;
+    }
+    if (target.hidden !== entry.hidden) target.hidden = entry.hidden;
+    if (entry.characters !== undefined && target.type === 'text' && target.characters !== entry.characters) {
+      target.characters = entry.characters;
+    }
+    if (entry.fills && !same(target.fills, entry.fills)) target.fills = clonePlain(entry.fills) as Fill[];
+    if (entry.strokes && !same(target.strokes, entry.strokes)) target.strokes = clonePlain(entry.strokes) as Stroke[];
+  });
+}
+
+// Vectors are rebuilt from their SVG source; raster-only nodes become a
+// rectangle with an image fill (uploaded from the snapshot if needed).
+async function createVectorOrImage(
+  parent: Board,
+  node: SlideNode,
+  absX: number,
+  absY: number,
+  warnings: string[]
+): Promise<Shape | null> {
+  if (node.svgMarkup) {
+    const vector = penpot.createShapeFromSvg(node.svgMarkup);
+    if (vector) {
+      vector.name = node.name;
+      parent.appendChild(vector);
+      vector.opacity = node.opacity;
+      vector.x = absX;
+      vector.y = absY;
+      vector.resize(node.width, node.height);
+      return vector;
+    }
+  }
+
+  const rect = penpot.createRectangle();
+  rect.name = node.name;
+  parent.appendChild(rect);
+
+  const hasImageFill = (node.fills ?? []).some((f) => (f as { fillImage?: unknown }).fillImage);
+  if (hasImageFill) {
+    rect.fills = clonePlain(node.fills) as Fill[];
+  } else if (node.imageUrl) {
+    const match = /^data:([^;]+);base64,(.*)$/.exec(node.imageUrl);
+    if (match) {
+      const image = await penpot.uploadMediaData(node.name, base64ToUint8Array(match[2]), match[1]);
+      rect.fills = [{ fillOpacity: 1, fillImage: image }];
+    }
+  } else {
+    warnings.push(`"${node.name}" has no visual source — inserted an empty placeholder.`);
+    rect.fills = [];
+  }
+  if (node.strokes?.length) rect.strokes = clonePlain(node.strokes) as Stroke[];
+  place(rect, node, absX, absY);
+  return rect;
+}
+
+// Geometry order matters: size and position describe the unrotated box, and
+// Penpot rotates around the centre, matching the editor's CSS rotate().
+function place(shape: Shape, node: SlideNode, absX: number, absY: number) {
+  shape.resize(Math.max(0.01, node.width), Math.max(0.01, node.height));
+  shape.x = absX;
+  shape.y = absY;
+  shape.opacity = node.opacity;
+  if (node.rotation) shape.rotation = node.rotation;
+}
+
+// Font resolution goes through penpot.fonts so Penpot gets a real fontId and
+// variant; setting `fontFamily` alone leaves Penpot guessing.
+function applyTextStyle(text: Text, node: SlideNode, warnings: string[]) {
+  const font =
+    (node.fontId ? penpot.fonts.findById(node.fontId) : null) ??
+    (node.fontFamily ? penpot.fonts.findByName(node.fontFamily) : null);
+
+  if (font) {
+    const weight = node.fontWeight ?? '400';
+    const style = node.fontStyle ?? 'normal';
+    const variant =
+      font.variants.find((v) => v.fontVariantId === node.fontVariantId) ??
+      font.variants.find((v) => v.fontWeight === weight && v.fontStyle === style) ??
+      font.variants.find((v) => v.fontWeight === weight) ??
+      undefined;
+    font.applyToText(text, variant);
+  } else if (node.fontFamily && node.fontFamily !== 'sans-serif') {
+    warnings.push(`Font "${node.fontFamily}" is not available in this file — Penpot's default font was used.`);
+  }
+
+  if (node.fontSize != null) text.fontSize = String(node.fontSize);
+  if (node.lineHeight != null) text.lineHeight = String(node.lineHeight);
+  if (node.letterSpacing != null) text.letterSpacing = String(node.letterSpacing);
+  if (node.textAlign) text.align = node.textAlign;
+  if (node.verticalAlign) text.verticalAlign = node.verticalAlign;
+  if (node.textTransform) text.textTransform = node.textTransform;
+  if (node.textDecoration) text.textDecoration = node.textDecoration;
+}
+
+// Full fills/strokes snapshots win; otherwise synthesise a solid fill/stroke
+// from the flat fields so nodes created in the plugin still render.
+function applyFillsAndStrokes(
+  shape: { fills: Fill[] | 'mixed'; strokes: Stroke[] | 'mixed' },
+  node: SlideNode,
+  defaults: { fill: string }
 ) {
   if (node.fills && node.fills.length > 0) {
     shape.fills = clonePlain(node.fills) as Fill[];
   } else {
     shape.fills = [
       {
-        fillColor: node.fill ?? defaults.fill,
-        fillOpacity: node.fillOpacity ?? defaults.fillOpacity ?? 1,
+        fillColor: (node.type === 'text' ? node.fontColor : node.fill) ?? defaults.fill,
+        fillOpacity: node.fillOpacity ?? 1,
       },
     ];
   }
@@ -873,120 +1120,16 @@ function applyFillsAndStrokes(
   }
 }
 
-// Recursive board populator. Group nodes accumulate their offset so children
-// land at the correct absolute slide coordinates.
-//
-// Iteration order: `slide.nodes[0]` is the top of the visual stack in our
-// model (matches how `SlideCanvas` renders via `.map()` where later DOM
-// siblings paint on top). Penpot stacks children such that calling
-// `board.appendChild` for each node in natural order results in the first
-// array element ending up BEHIND the others. Iterating in reverse so the
-// top-of-stack node is appended last keeps it visually on top in Penpot.
-function populateBoardWithNodes(
-  board: ReturnType<typeof penpot.createBoard>,
-  nodes: SlideNode[],
-  offsetX: number,
-  offsetY: number
-) {
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const node = nodes[i];
-    if (!node.visible) continue;
-
-    const absX = offsetX + node.x;
-    const absY = offsetY + node.y;
-
-    try {
-      if (node.type === 'group') {
-        populateBoardWithNodes(board, node.children ?? [], absX, absY);
-        continue;
-      }
-
-      if (node.type === 'text') {
-        const text = penpot.createText(node.text ?? '');
-        if (text) {
-          text.name = node.name;
-          // Fixed growth so resize() honours the slide layout instead of
-          // auto-fitting to the characters.
-          text.growType = 'fixed';
-          text.x = absX;
-          text.y = absY;
-          text.resize(node.width, node.height);
-          text.opacity = node.opacity;
-          text.rotation = node.rotation;
-
-          if (node.fontFamily) text.fontFamily = node.fontFamily;
-          if (node.fontSize != null) text.fontSize = String(node.fontSize);
-          if (node.fontWeight) text.fontWeight = node.fontWeight;
-          if (node.lineHeight != null) text.lineHeight = String(node.lineHeight);
-          if (node.letterSpacing != null) text.letterSpacing = String(node.letterSpacing);
-          if (node.textAlign) text.align = node.textAlign;
-
-          applyFillsAndStrokes(text, node, {
-            fill: node.fontColor ?? '#ffffff',
-          });
-
-          board.appendChild(text);
-        }
-        continue;
-      }
-
-      if (node.type === 'rect' || node.type === 'image' || node.type === 'path') {
-        const rect = penpot.createRectangle();
-        rect.name = node.name;
-        rect.x = absX;
-        rect.y = absY;
-        rect.resize(node.width, node.height);
-        rect.opacity = node.opacity;
-        rect.rotation = node.rotation;
-
-        applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
-
-        if (node.borderRadius) {
-          rect.borderRadius = node.borderRadius;
-        }
-
-        board.appendChild(rect);
-        continue;
-      }
-
-      if (node.type === 'ellipse') {
-        const ellipse = penpot.createEllipse();
-        ellipse.name = node.name;
-        ellipse.x = absX;
-        ellipse.y = absY;
-        ellipse.resize(node.width, node.height);
-        ellipse.opacity = node.opacity;
-        ellipse.rotation = node.rotation;
-
-        applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
-
-        board.appendChild(ellipse);
-        continue;
-      }
-
-      if (node.type === 'component-instance') {
-        const allLibs = [penpot.library.local, ...penpot.library.connected];
-        const lib = allLibs.find((l) => l.id === node.libraryId);
-        const comp = lib?.components.find((c) => c.id === node.componentId);
-        if (comp) {
-          const instance = comp.instance();
-          instance.name = node.name;
-          instance.x = absX;
-          instance.y = absY;
-          instance.resize(node.width, node.height);
-          board.appendChild(instance);
-        }
-        continue;
-      }
-    } catch {
-      // Skip nodes that fail to create
-    }
-  }
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function send(message: PluginMessage) {
+  penpot.ui.sendMessage(message);
+}
+
 function sendError(message: string) {
-  const msg: PluginMessage = { type: 'error', message };
-  penpot.ui.sendMessage(msg);
+  send({ type: 'error', message });
+}
+
+function dedupe(items: string[]): string[] {
+  return [...new Set(items)];
 }

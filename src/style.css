@@ -1575,3 +1575,57 @@ button {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border-radius: var(--spacing-8); background: var(--background-quaternary); }
 ::-webkit-scrollbar-thumb:hover { background: var(--foreground-secondary); }
+
+/* ─── Notices (toasts) ──────────────────────────────────────────────────── */
+
+.notices {
+  position: fixed;
+  inset-block-end: var(--spacing-12);
+  inset-inline-end: var(--spacing-12);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-8);
+  inline-size: min(360px, calc(100vw - 2 * var(--spacing-12)));
+}
+
+.notice {
+  background: var(--background-tertiary);
+  color: var(--foreground-primary);
+  border-inline-start: 3px solid var(--foreground-secondary);
+  border-radius: var(--border-radius-m);
+  padding: var(--spacing-8) var(--spacing-12);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+}
+
+.notice--error { border-inline-start-color: var(--error-500); }
+.notice--warning { border-inline-start-color: var(--warning-500); }
+.notice--success { border-inline-start-color: var(--success-500); }
+
+.notice-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-8);
+}
+
+.notice-message { flex: 1; }
+
+.notice-close {
+  background: none;
+  border: none;
+  color: var(--foreground-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-m);
+  line-height: 1;
+  padding: 0;
+}
+
+.notice-toggle { margin-block-start: var(--spacing-4); }
+
+.notice-details {
+  margin: var(--spacing-4) 0 0;
+  padding-inline-start: var(--spacing-16);
+  max-block-size: 160px;
+  overflow: auto;
+  color: var(--foreground-secondary);
+}

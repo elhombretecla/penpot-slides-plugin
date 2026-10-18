@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide, SlideNode } from '../types';
+import { findNodeById, normalizeHex, primaryFillHex, withPrimaryFillColor } from '../utils';
 
 interface Props { slide: Slide | null; }
 
@@ -9,6 +10,8 @@ export default function PropertiesPanel({ slide }: Props) {
   const updateNode = useSlideStore((s) => s.updateNode);
   const updateSlide = useSlideStore((s) => s.updateSlide);
   const deleteNode = useSlideStore((s) => s.deleteNode);
+  const commitHistory = useSlideStore((s) => s.commitHistory);
+  const commitHistoryCoalesced = useSlideStore((s) => s.commitHistoryCoalesced);
 
   if (!slide) {
     return (
@@ -18,12 +21,17 @@ export default function PropertiesPanel({ slide }: Props) {
     );
   }
 
+  // Template content is almost always nested inside groups / boards, so the
+  // lookup must walk the whole tree, not only the top level.
   const selectedNode = selectedNodeIds.length === 1
-    ? (slide.nodes.find((n) => n.id === selectedNodeIds[0]) ?? null)
+    ? findNodeById(slide.nodes, selectedNodeIds[0])
     : null;
 
+  // Every edit is undoable; bursts on the same fields (typing, spinning a
+  // number input) collapse into a single undo step.
   function update(updates: Partial<SlideNode>) {
     if (!slide || !selectedNode) return;
+    commitHistoryCoalesced(`node:${selectedNode.id}:${Object.keys(updates).sort().join(',')}`);
     updateNode(slide.id, selectedNode.id, updates);
   }
 
@@ -32,18 +40,22 @@ export default function PropertiesPanel({ slide }: Props) {
       {!selectedNode ? (
         <SlideProperties
           slide={slide}
-          onUpdateBackground={(c) =>
+          onUpdateBackground={(c) => {
+            commitHistoryCoalesced(`slide:${slide.id}:background`);
             // Clear the fills snapshot too — otherwise `fillsToCss(slide.backgroundFills)`
             // in SlideCanvas keeps returning the imported gradient and the
             // new solid color is never shown (same story on export).
-            updateSlide(slide.id, { background: c, backgroundFills: undefined })
-          }
+            updateSlide(slide.id, { background: c, backgroundFills: undefined });
+          }}
         />
       ) : (
         <NodeProperties
           node={selectedNode}
           onUpdate={update}
-          onDelete={() => { if (slide) deleteNode(slide.id, selectedNode.id); }}
+          onDelete={() => {
+            commitHistory();
+            deleteNode(slide.id, selectedNode.id);
+          }}
         />
       )}
     </div>
@@ -60,6 +72,7 @@ function SlideProperties({
   onUpdateBackground: (c: string) => void;
 }) {
   const updateSlide = useSlideStore((s) => s.updateSlide);
+  const commitHistoryCoalesced = useSlideStore((s) => s.commitHistoryCoalesced);
   return (
     <div className="prop-section">
       <div className="prop-section-header">SLIDE</div>
@@ -68,7 +81,10 @@ function SlideProperties({
         <input
           className="input input-sm"
           value={slide.name}
-          onChange={(e) => updateSlide(slide.id, { name: e.target.value })}
+          onChange={(e) => {
+            commitHistoryCoalesced(`slide:${slide.id}:name`);
+            updateSlide(slide.id, { name: e.target.value });
+          }}
         />
       </PropRow>
 
@@ -132,12 +148,8 @@ function NodeProperties({
         {(node.type === 'rect' || node.type === 'ellipse') && (
           <PropRow label="Fill">
             <ColorInput
-              value={node.fill ?? '#ffffff'}
-              onChange={(v) =>
-                // Drop the imported fills snapshot so the flat `fill` field
-                // actually wins in the canvas render and on export.
-                onUpdate({ fill: v, fills: undefined })
-              }
+              value={primaryFillHex(node.fills, node.fill ?? '#ffffff')}
+              onChange={(v) => onUpdate({ fill: v, fills: withPrimaryFillColor(node.fills, v) })}
             />
           </PropRow>
         )}
@@ -182,12 +194,8 @@ function NodeProperties({
 
           <PropRow label="Color">
             <ColorInput
-              value={node.fontColor ?? '#ffffff'}
-              onChange={(v) =>
-                // Text color is read from firstFillColor(node.fills) first,
-                // so clear the snapshot to let fontColor take effect.
-                onUpdate({ fontColor: v, fills: undefined })
-              }
+              value={primaryFillHex(node.fills, node.fontColor ?? '#ffffff')}
+              onChange={(v) => onUpdate({ fontColor: v, fills: withPrimaryFillColor(node.fills, v) })}
             />
           </PropRow>
 
@@ -281,22 +289,39 @@ function NumberInput({
   );
 }
 
+// The hex field keeps a local draft so half-typed values ("#a1") are never
+// written to the slide; only complete #rgb / #rrggbb values are committed.
 function ColorInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+
   return (
     <div className="prop-color-wrap">
       <input
         className="prop-color-swatch"
         type="color"
-        value={value}
+        value={normalizeHex(value) ?? '#000000'}
         onChange={(e) => onChange(e.target.value)}
       />
       <input
         className="input"
         type="text"
-        value={value}
+        value={draft}
         maxLength={7}
         style={{ width: '80px', fontFamily: 'monospace', fontSize: 'var(--font-size-xs)', paddingBlock: 'var(--spacing-4)' }}
-        onChange={(e) => { const v = e.target.value; if (/^#[0-9a-fA-F]{0,6}$/.test(v)) onChange(v); }}
+        onChange={(e) => {
+          const raw = e.target.value.startsWith('#') ? e.target.value : `#${e.target.value}`;
+          if (!/^#[0-9a-fA-F]{0,6}$/.test(raw)) return;
+          setDraft(raw);
+          const hex = normalizeHex(raw);
+          if (hex && raw.length === 7) onChange(hex);
+        }}
+        onBlur={() => {
+          const hex = normalizeHex(draft);
+          if (hex) onChange(hex);
+          else setDraft(value);
+        }}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); }}
       />
     </div>
   );

@@ -6,11 +6,10 @@ import {
   makeEllipseNode,
   makeTextNode,
   fillsToCss,
-  firstFillColor,
   findNodeById,
   findNodeAbs,
   cloneNodeWithNewIds,
-  fontFamilyCss,
+  textNodeCss,
 } from '../utils';
 
 interface Props {
@@ -272,23 +271,20 @@ export default function SlideCanvas({ slide }: Props) {
   // when the pointer is outside the slide.
   const mouseSlidePosRef = useRef<{ x: number; y: number } | null>(null);
 
-  if (!slide) {
-    return (
-      <div className="slide-canvas-empty">
-        <p>Select a slide to edit</p>
-      </div>
-    );
-  }
-
-  const scaleX = CANVAS_MAX_WIDTH / slide.width;
-  const scaleY = CANVAS_MAX_HEIGHT / slide.height;
+  // Every hook below must run on every render (Rules of Hooks), so the
+  // "no slide" early return lives right before the JSX, not here. Geometry
+  // falls back to a 1×1 slide while there is nothing to show.
+  const slideWidth = slide?.width || 1;
+  const slideHeight = slide?.height || 1;
+  const scaleX = CANVAS_MAX_WIDTH / slideWidth;
+  const scaleY = CANVAS_MAX_HEIGHT / slideHeight;
   const fitScale = Math.min(scaleX, scaleY, 1);
   // Final scale combines fit-to-viewport with the user zoom; all internal
   // drag/resize math divides by this, so coordinate conversions stay correct
   // at any zoom level.
   const scale = fitScale * zoom;
-  const displayW = slide.width * scale;
-  const displayH = slide.height * scale;
+  const displayW = slideWidth * scale;
+  const displayH = slideHeight * scale;
 
   function toSlideCoords(canvasX: number, canvasY: number) {
     return { x: canvasX / scale, y: canvasY / scale };
@@ -341,7 +337,7 @@ export default function SlideCanvas({ slide }: Props) {
   }, [scale]);
 
   const handleCanvasMouseUp = useCallback(
-    (_e: React.MouseEvent<HTMLDivElement>) => {
+    () => {
       const drag = canvasDragRef.current;
       if (!drag || !canvasDragRect) return;
       canvasDragRef.current = null;
@@ -493,6 +489,16 @@ export default function SlideCanvas({ slide }: Props) {
     },
     [activeTool, commitHistory, selectedNodeIds, setSelectedNodes, slide, scale, updateNode]
   );
+
+  useKeyboardTools(setActiveTool);
+
+  if (!slide) {
+    return (
+      <div className="slide-canvas-empty">
+        <p>Select a slide to edit</p>
+      </div>
+    );
+  }
 
   return (
     <div className="slide-canvas-container">
@@ -712,8 +718,6 @@ function CanvasNode({
   const isSelected = selectedNodeIds.includes(node.id);
   const isEditing = editingNodeId === node.id;
 
-  if (!node.visible) return null;
-
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (isEditing) return;
@@ -730,6 +734,9 @@ function CanvasNode({
     },
     [node.id, node.type, onStartEditing]
   );
+
+  // After the hooks: hiding a layer must not change the hook call order.
+  if (!node.visible) return null;
 
   const wrapperStyle: React.CSSProperties = {
     position: 'absolute',
@@ -770,6 +777,7 @@ function CanvasNode({
             position: 'absolute',
             inset: 0,
             background: groupBg,
+            borderRadius: node.borderRadius ? node.borderRadius * scale : undefined,
             overflow: node.clipContent ? 'hidden' : 'visible',
           }}
         >
@@ -805,24 +813,9 @@ function CanvasNode({
 
   const content = (() => {
     if (node.type === 'text') {
-      const textColor = firstFillColor(node.fills) ?? node.fontColor ?? '#ffffff';
+      const css = textNodeCss(node, scale);
       return (
-        <div
-          style={{
-            width: '100%',
-            height: '100%',
-            color: textColor,
-            fontSize: (node.fontSize ?? 16) * scale,
-            fontWeight: node.fontWeight ?? '400',
-            fontFamily: fontFamilyCss(node.fontFamily),
-            textAlign: node.textAlign ?? 'left',
-            lineHeight: node.lineHeight ?? 1.4,
-            letterSpacing: node.letterSpacing ? `${node.letterSpacing}px` : undefined,
-            overflow: 'hidden',
-            wordBreak: 'break-word',
-            whiteSpace: 'pre-wrap',
-          }}
-        >
+        <div style={css}>
           {isEditing ? (
             <textarea
               autoFocus
@@ -830,11 +823,13 @@ function CanvasNode({
               style={{
                 width: '100%',
                 height: '100%',
-                color: textColor,
-                fontSize: (node.fontSize ?? 16) * scale,
-                fontWeight: node.fontWeight ?? '400',
-                fontFamily: fontFamilyCss(node.fontFamily),
-                textAlign: node.textAlign ?? 'left',
+                color: css.color,
+                font: 'inherit',
+                fontSize: css.fontSize,
+                textAlign: css.textAlign,
+                textTransform: css.textTransform,
+                letterSpacing: css.letterSpacing,
+                lineHeight: css.lineHeight,
                 background: 'transparent',
                 border: '1px solid #6457f0',
                 resize: 'none',
@@ -1144,7 +1139,11 @@ function ToolButton({ active, onClick, title, children }: ToolButtonProps) {
 function useKeyboardTools(setActiveTool: (t: Tool) => void) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+      // Modifier chords belong to copy/paste/undo/zoom, not to tool switching.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return;
       if (e.key === 'v' || e.key === 'V') setActiveTool('select');
       if (e.key === 't' || e.key === 'T') setActiveTool('text');
       if (e.key === 'r' || e.key === 'R') setActiveTool('rect');

@@ -1,10 +1,8 @@
 import { useEffect, useCallback } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { useSlideStore } from '../store';
 import { penpotApi } from '../api';
-import { isSlideLike, getFilteredComponents } from '../utils';
+import { isSlideLike, getFilteredComponents, slideFromImported } from '../utils';
 import type { Slide, ComponentInfo, ImportItemRequest } from '../types';
-import { SLIDE_SIZE_PRESETS } from '../types';
 
 export default function LibraryPicker() {
   const setScreen = useSlideStore((s) => s.setScreen);
@@ -23,7 +21,7 @@ export default function LibraryPicker() {
   const setSearchQuery = useSlideStore((s) => s.setSearchQuery);
   const activeLibraryId = useSlideStore((s) => s.activeLibraryId);
   const setActiveLibraryId = useSlideStore((s) => s.setActiveLibraryId);
-  const clearThumbnails = useSlideStore((s) => s.clearThumbnails);
+  const requestComponents = useSlideStore((s) => s.requestComponents);
   const startImportJob = useSlideStore((s) => s.startImportJob);
   const getCachedComponent = useSlideStore((s) => s.getCachedComponent);
 
@@ -37,9 +35,9 @@ export default function LibraryPicker() {
   useEffect(() => {
     if (activeLibraryId && !componentsMap[activeLibraryId]) {
       setComponentsLoading(true);
-      penpotApi.getComponents(activeLibraryId);
+      requestComponents(activeLibraryId);
     }
-  }, [activeLibraryId, componentsMap, setComponentsLoading]);
+  }, [activeLibraryId, componentsMap, setComponentsLoading, requestComponents]);
 
   useEffect(() => {
     if (!activeLibraryId && libraries.length > 0) {
@@ -47,16 +45,18 @@ export default function LibraryPicker() {
     }
   }, [activeLibraryId, libraries, setActiveLibraryId]);
 
+  // Switching libraries supersedes (cancels) the running thumbnail job. The
+  // request is re-sent even for a cached list when some of its thumbnails
+  // never arrived — the plugin skips the ones the UI already has.
   const handleLibraryChange = useCallback(
     (libraryId: string) => {
       setActiveLibraryId(libraryId);
-      clearThumbnails();
-      if (!componentsMap[libraryId]) {
-        setComponentsLoading(true);
-        penpotApi.getComponents(libraryId);
-      }
+      const cached = componentsMap[libraryId];
+      if (!cached) setComponentsLoading(true);
+      const { thumbnailsMap } = useSlideStore.getState();
+      if (!cached || cached.some((c) => !thumbnailsMap[c.id])) requestComponents(libraryId);
     },
-    [componentsMap, setActiveLibraryId, setComponentsLoading, clearThumbnails]
+    [componentsMap, setActiveLibraryId, setComponentsLoading, requestComponents]
   );
 
   const currentComponents: ComponentInfo[] = activeLibraryId
@@ -72,8 +72,6 @@ export default function LibraryPicker() {
     const selectedIds = Array.from(selectedComponentIds);
     if (selectedIds.length === 0) return;
 
-    const size = SLIDE_SIZE_PRESETS['16:9'];
-
     // Split into cached (instant) and uncached (need a plugin round-trip).
     const cachedSlides: Slide[] = [];
     const toImport: ImportItemRequest[] = [];
@@ -85,20 +83,14 @@ export default function LibraryPicker() {
 
       const cached = getCachedComponent(libraryId, componentId);
       if (cached) {
-        cachedSlides.push({
-          id: uuidv4(),
-          name: cached.componentName || name,
-          source: 'library-component',
-          width: cached.width || comp?.width || size.width,
-          height: cached.height || comp?.height || size.height,
-          background: cached.background,
-          nodes: cached.nodes,
-          libraryId: cached.libraryId,
-          componentId: cached.componentId,
-          componentName: cached.componentName,
-          thumbnailUrl: thumbnailsMap[componentId],
-          nodesLoading: false,
-        });
+        cachedSlides.push(
+          slideFromImported(cached, {
+            name,
+            width: comp?.width,
+            height: comp?.height,
+            thumbnailUrl: thumbnailsMap[componentId],
+          })
+        );
       } else {
         toImport.push({
           componentId,

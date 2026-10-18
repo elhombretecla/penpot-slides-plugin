@@ -438,3 +438,102 @@ export function firstFillColor(fills: unknown[] | undefined): string | undefined
   }
   return undefined;
 }
+
+// ─── Fill editing ─────────────────────────────────────────────────────────────
+
+// Normalise "#abc" / "#AABBCC" to "#aabbcc"; anything else → null.
+export function normalizeHex(value: string): string | null {
+  const v = value.trim();
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(v);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toLowerCase();
+  return /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null;
+}
+
+// Color shown in a picker for a fills stack: the first solid fill, else the
+// first gradient stop, else the flat fallback field.
+export function primaryFillHex(fills: unknown[] | undefined, fallback: string): string {
+  for (const raw of fills ?? []) {
+    const f = raw as PenpotFillLike;
+    if (f.fillColor && !f.fillColorGradient && !f.fillImage) return normalizeHex(f.fillColor) ?? fallback;
+  }
+  for (const raw of fills ?? []) {
+    const f = raw as PenpotFillLike;
+    const stop = f.fillColorGradient?.stops[0];
+    if (stop?.color) return normalizeHex(stop.color) ?? fallback;
+  }
+  return normalizeHex(fallback) ?? '#000000';
+}
+
+// Replace the color of the primary (first solid) fill while keeping its
+// opacity and every other fill in the stack (gradients, images, overlays).
+// The library color link is dropped on purpose: the value no longer matches
+// the library color. Returns undefined when there was no snapshot, so the
+// caller falls back to the flat field.
+export function withPrimaryFillColor(fills: unknown[] | undefined, hex: string): unknown[] | undefined {
+  if (!fills || fills.length === 0) return undefined;
+  const idx = fills.findIndex((raw) => {
+    const f = raw as PenpotFillLike;
+    return !!f.fillColor && !f.fillColorGradient && !f.fillImage;
+  });
+  const solid = (prev?: PenpotFillLike) => ({ fillColor: hex, fillOpacity: prev?.fillOpacity ?? 1 });
+  if (idx === -1) return [solid(), ...fills];
+  return fills.map((raw, i) => (i === idx ? solid(raw as PenpotFillLike) : raw));
+}
+
+// ─── Imported components → slides ─────────────────────────────────────────────
+
+// Build a slide from an imported (possibly cached) component. Node ids are
+// regenerated so the same template can be added several times without two
+// slides sharing ids (selection, copy/paste and history rely on uniqueness).
+export function slideFromImported(
+  payload: import('./types').ImportedComponentPayload,
+  fallback: { name: string; width?: number; height?: number; thumbnailUrl?: string }
+): Slide {
+  const defaultSize = SLIDE_SIZE_PRESETS['16:9'];
+  return {
+    id: uuidv4(),
+    name: payload.componentName || fallback.name,
+    source: 'library-component',
+    width: payload.width || fallback.width || defaultSize.width,
+    height: payload.height || fallback.height || defaultSize.height,
+    background: payload.background,
+    backgroundFills: payload.backgroundFills,
+    nodes: payload.nodes.map(cloneNodeWithNewIds),
+    libraryId: payload.libraryId,
+    componentId: payload.componentId,
+    componentName: payload.componentName,
+    thumbnailUrl: fallback.thumbnailUrl,
+    nodesLoading: false,
+  };
+}
+
+// ─── Text rendering ───────────────────────────────────────────────────────────
+
+// CSS for a text node, shared by the editor canvas and the slide thumbnails
+// so both previews agree with each other and with what export writes back.
+// `scale` converts slide units to screen pixels (1 for thumbnails, which are
+// scaled as a whole with a CSS transform).
+export function textNodeCss(node: SlideNode, scale: number): import('react').CSSProperties {
+  const justify =
+    node.verticalAlign === 'center' ? 'center' : node.verticalAlign === 'bottom' ? 'flex-end' : 'flex-start';
+  return {
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: justify,
+    color: firstFillColor(node.fills) ?? node.fontColor ?? '#000000',
+    fontSize: (node.fontSize ?? 14) * scale,
+    fontWeight: node.fontWeight ?? '400',
+    fontStyle: node.fontStyle ?? 'normal',
+    fontFamily: fontFamilyCss(node.fontFamily),
+    textAlign: node.textAlign ?? 'left',
+    textTransform: node.textTransform ?? 'none',
+    textDecoration: node.textDecoration ?? 'none',
+    lineHeight: node.lineHeight ?? 1.2,
+    letterSpacing: node.letterSpacing ? `${node.letterSpacing * scale}px` : undefined,
+    overflow: 'hidden',
+    wordBreak: 'break-word',
+    whiteSpace: 'pre-wrap',
+  };
+}

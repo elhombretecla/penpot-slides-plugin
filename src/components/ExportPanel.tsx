@@ -28,6 +28,9 @@ export default function ExportPanel() {
         <span className="export-info-badge">Total: {slides.length} Slides</span>
         <p className="export-info-desc">
           Slides will be arranged horizontally on the canvas.
+          {exportSettings.wrapInDeck
+            ? ' They go inside one "Slides deck" board.'
+            : " Each slide is a top-level board, so Penpot's View mode can present them."}
         </p>
       </div>
 
@@ -63,13 +66,13 @@ export default function ExportPanel() {
               <rect x="3" y="13" width="8" height="8" rx="1"/>
               <rect x="13" y="13" width="8" height="8" rx="1"/>
             </svg>
-            <span className="body-s">Group into Section</span>
+            <span className="body-s">Wrap slides in a deck board</span>
           </div>
           <button
-            className={`toggle ${exportSettings.groupIntoSection ? 'on' : 'off'}`}
-            onClick={() => setExportSettings({ groupIntoSection: !exportSettings.groupIntoSection })}
+            className={`toggle ${exportSettings.wrapInDeck ? 'on' : 'off'}`}
+            onClick={() => setExportSettings({ wrapInDeck: !exportSettings.wrapInDeck })}
             role="switch"
-            aria-checked={exportSettings.groupIntoSection}
+            aria-checked={exportSettings.wrapInDeck}
           >
             <span className="toggle-thumb" />
           </button>

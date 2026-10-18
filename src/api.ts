@@ -11,7 +11,8 @@ function send(message: UIMessage) {
 
 export const penpotApi = {
   getLibraries: () => send({ type: 'get-libraries' }),
-  getComponents: (libraryId: string) => send({ type: 'get-components', libraryId }),
+  getComponents: (requestId: string, libraryId: string, knownThumbnailIds: string[]) =>
+    send({ type: 'get-components', requestId, libraryId, knownThumbnailIds }),
   importComponents: (requestId: string, items: ImportItemRequest[]) =>
     send({ type: 'import-components', requestId, items }),
   insertIntoCanvas: (slides: Slide[], settings: ExportSettings) =>

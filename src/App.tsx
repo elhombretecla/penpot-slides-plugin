@@ -1,13 +1,13 @@
 import { useEffect } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { useSlideStore } from './store';
 import type { PluginMessage, Slide } from './types';
-import { SLIDE_SIZE_PRESETS } from './types';
+import { slideFromImported } from './utils';
 import HomeScreen from './screens/HomeScreen';
 import LibraryPicker from './screens/LibraryPicker';
 import SlideManager from './screens/SlideManager';
 import NewSlideModal from './components/NewSlideModal';
 import ImportProgressOverlay from './components/ImportProgressOverlay';
+import Notices from './components/Notices';
 
 export default function App() {
   const screen = useSlideStore((s) => s.screen);
@@ -15,12 +15,10 @@ export default function App() {
   const setTheme = useSlideStore((s) => s.setTheme);
   const setLibraries = useSlideStore((s) => s.setLibraries);
   const setLibrariesLoading = useSlideStore((s) => s.setLibrariesLoading);
-  const setComponents = useSlideStore((s) => s.setComponents);
   const setComponentsLoading = useSlideStore((s) => s.setComponentsLoading);
   const setIsInserting = useSlideStore((s) => s.setIsInserting);
   const setInsertResult = useSlideStore((s) => s.setInsertResult);
   const setThumbnail = useSlideStore((s) => s.setThumbnail);
-  const setPendingThumbnails = useSlideStore((s) => s.setPendingThumbnails);
   const showNewSlideModal = useSlideStore((s) => s.showNewSlideModal);
 
   // Read theme from URL param on mount
@@ -56,17 +54,15 @@ export default function App() {
           break;
 
         case 'components':
-          setComponents(data.libraryId, data.components);
-          setComponentsLoading(false);
-          setPendingThumbnails(data.components.map((c) => c.id));
+          store.receiveComponents(data.requestId, data.libraryId, data.components);
           break;
 
         case 'thumbnail':
-          setThumbnail(data.componentId, data.thumbnail);
+          setThumbnail(data.requestId, data.componentId, data.thumbnail);
           break;
 
         case 'thumbnails-complete':
-          setPendingThumbnails([]);
+          store.finishThumbnails(data.requestId);
           break;
 
         case 'import-start':
@@ -94,7 +90,7 @@ export default function App() {
             width: data.width,
             height: data.height,
             importedAt: Date.now(),
-          });
+          }, data.warnings ?? []);
           break;
 
         case 'import-item-error':
@@ -114,6 +110,13 @@ export default function App() {
         case 'insert-complete':
           setIsInserting(false);
           setInsertResult({ count: data.count });
+          if (data.warnings.length > 0) {
+            store.pushNotice(
+              'warning',
+              `${data.count} slide${data.count !== 1 ? 's' : ''} inserted with ${data.warnings.length} issue${data.warnings.length !== 1 ? 's' : ''}.`,
+              data.warnings
+            );
+          }
           break;
 
         case 'error':
@@ -121,6 +124,7 @@ export default function App() {
           setLibrariesLoading(false);
           setComponentsLoading(false);
           console.error('[SlideBuilder]', data.message);
+          store.pushNotice('error', data.message);
           break;
 
         case 'theme':
@@ -135,12 +139,10 @@ export default function App() {
     setTheme,
     setLibraries,
     setLibrariesLoading,
-    setComponents,
     setComponentsLoading,
     setIsInserting,
     setInsertResult,
     setThumbnail,
-    setPendingThumbnails,
   ]);
 
   return (
@@ -150,6 +152,7 @@ export default function App() {
       {screen === 'slide-manager' && <SlideManager />}
       {showNewSlideModal && <NewSlideModal />}
       <ImportProgressOverlay />
+      <Notices />
     </div>
   );
 }
@@ -162,29 +165,18 @@ function finalizeImport(requestId: string) {
   const job = state.importJob;
   if (!job || job.requestId !== requestId) return;
 
-  const thumbnails = state.thumbnailsMap;
-  const defaultSize = SLIDE_SIZE_PRESETS['16:9'];
-
   const newSlides: Slide[] = [];
   for (const item of job.items) {
     const cached = state.getCachedComponent(item.libraryId, item.componentId);
     if (!cached) continue;
-
-    newSlides.push({
-      id: uuidv4(),
-      name: cached.componentName || item.componentName,
-      source: 'library-component',
-      width: cached.width || item.width || defaultSize.width,
-      height: cached.height || item.height || defaultSize.height,
-      background: cached.background,
-      backgroundFills: cached.backgroundFills,
-      nodes: cached.nodes,
-      libraryId: cached.libraryId,
-      componentId: cached.componentId,
-      componentName: cached.componentName,
-      thumbnailUrl: thumbnails[cached.componentId],
-      nodesLoading: false,
-    });
+    newSlides.push(
+      slideFromImported(cached, {
+        name: item.componentName,
+        width: item.width,
+        height: item.height,
+        thumbnailUrl: state.thumbnailsMap[cached.componentId],
+      })
+    );
   }
 
   if (newSlides.length > 0) {
@@ -193,6 +185,23 @@ function finalizeImport(requestId: string) {
   }
 
   state.clearComponentSelection();
+
+  // The progress overlay closes after a moment, so failures must outlive it.
+  if (job.errors.length > 0) {
+    state.pushNotice(
+      'error',
+      `${job.errors.length} template${job.errors.length !== 1 ? 's' : ''} could not be imported.`,
+      job.errors.map((e) => `${e.componentName}: ${e.message}`)
+    );
+  }
+
+  if (job.warnings.length > 0) {
+    state.pushNotice(
+      'warning',
+      `Imported with ${job.warnings.length} issue${job.warnings.length !== 1 ? 's' : ''}: some elements were simplified or skipped.`,
+      [...new Set(job.warnings)]
+    );
+  }
 
   // Keep the overlay visible briefly so the user sees the completion state,
   // then dismiss it.

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
+import { penpotApi } from './api';
 import type {
   Slide,
   SlideNode,
@@ -13,6 +14,13 @@ import type {
 } from './types';
 
 export type Screen = 'home' | 'library-picker' | 'slide-manager';
+
+export interface Notice {
+  id: string;
+  kind: 'error' | 'warning' | 'success';
+  message: string;
+  details?: string[];
+}
 export type SidePanel = 'properties' | 'layers';
 
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
@@ -40,14 +48,18 @@ function mapNodes(
   return out;
 }
 
+// Node arrays are ordered bottom→top, exactly like Penpot `children`: a
+// higher index paints in front. 'forward' moves one step towards the front.
+export type StackDirection = 'forward' | 'backward';
+
 function reorderSiblings(
   nodes: SlideNode[],
   nodeId: string,
-  direction: 'up' | 'down'
+  direction: StackDirection
 ): { nodes: SlideNode[]; moved: boolean } {
   const idx = nodes.findIndex((n) => n.id === nodeId);
   if (idx !== -1) {
-    const target = direction === 'up' ? idx - 1 : idx + 1;
+    const target = direction === 'forward' ? idx + 1 : idx - 1;
     if (target < 0 || target >= nodes.length) return { nodes, moved: true };
     const next = [...nodes];
     [next[idx], next[target]] = [next[target], next[idx]];
@@ -103,6 +115,10 @@ function regenerateNodeIds(nodes: SlideNode[]): SlideNode[] {
   }));
 }
 
+// Coalescing state lives outside the store: it never needs to re-render UI.
+const HISTORY_COALESCE_MS = 1000;
+let lastCoalesced: { key: string; at: number } | null = null;
+
 // ─── Store Definition ─────────────────────────────────────────────────────────
 
 interface SlideStore {
@@ -122,14 +138,24 @@ interface SlideStore {
 
   componentsMap: Record<string, ComponentInfo[]>;
   setComponents: (libraryId: string, components: ComponentInfo[]) => void;
+  receiveComponents: (requestId: string, libraryId: string, components: ComponentInfo[]) => void;
   componentsLoading: boolean;
   setComponentsLoading: (v: boolean) => void;
 
+  // Thumbnails are cached by component id for the whole session — switching
+  // libraries never throws them away. Only the latest components request may
+  // update the pending set (older, cancelled requests are ignored).
   thumbnailsMap: Record<string, string>;
   thumbnailsPending: Set<string>;
-  setThumbnail: (componentId: string, thumbnail: string) => void;
-  setPendingThumbnails: (ids: string[]) => void;
-  clearThumbnails: () => void;
+  componentsRequestId: string | null;
+  requestComponents: (libraryId: string) => void;
+  setThumbnail: (requestId: string, componentId: string, thumbnail: string) => void;
+  finishThumbnails: (requestId: string) => void;
+
+  // ── Notices (toasts) ───────────────────────────────────────────────────────
+  notices: Notice[];
+  pushNotice: (kind: Notice['kind'], message: string, details?: string[]) => void;
+  dismissNotice: (id: string) => void;
 
   selectedComponentIds: Set<string>;
   toggleComponentSelection: (componentId: string, libraryId: string) => void;
@@ -148,7 +174,8 @@ interface SlideStore {
   ) => void;
   reportImportItem: (
     requestId: string,
-    payload: ImportedComponentPayload
+    payload: ImportedComponentPayload,
+    warnings: string[]
   ) => void;
   reportImportError: (requestId: string, error: ImportJobError) => void;
   finishImportJob: (requestId: string) => void;
@@ -171,6 +198,10 @@ interface SlideStore {
   // slide objects cannot be mutated after capture.
   history: { past: Slide[][]; future: Slide[][] };
   commitHistory: () => void;
+  // Like commitHistory, but consecutive calls with the same key within
+  // HISTORY_COALESCE_MS collapse into one undo step (typing in a field,
+  // dragging a number input…).
+  commitHistoryCoalesced: (key: string) => void;
   undo: () => void;
   redo: () => void;
 
@@ -187,7 +218,7 @@ interface SlideStore {
   addNode: (slideId: string, node: SlideNode) => void;
   updateNode: (slideId: string, nodeId: string, updates: Partial<SlideNode>) => void;
   deleteNode: (slideId: string, nodeId: string) => void;
-  reorderNode: (slideId: string, nodeId: string, direction: 'up' | 'down') => void;
+  reorderNode: (slideId: string, nodeId: string, direction: StackDirection) => void;
   setSlideNodes: (slideId: string, nodes: SlideNode[], background?: string) => void;
   selectNode: (nodeId: string | null) => void;
   addSelectedNode: (nodeId: string) => void;
@@ -234,22 +265,50 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     set((state) => ({
       componentsMap: { ...state.componentsMap, [libraryId]: components },
     })),
+  receiveComponents: (requestId, libraryId, components) =>
+    set((state) => ({
+      componentsMap: { ...state.componentsMap, [libraryId]: components },
+      componentsLoading: false,
+      thumbnailsPending:
+        requestId === state.componentsRequestId
+          ? new Set(components.filter((c) => !state.thumbnailsMap[c.id]).map((c) => c.id))
+          : state.thumbnailsPending,
+    })),
   componentsLoading: false,
   setComponentsLoading: (componentsLoading) => set({ componentsLoading }),
 
   thumbnailsMap: {},
   thumbnailsPending: new Set(),
-  setThumbnail: (componentId, thumbnail) =>
+  componentsRequestId: null,
+  requestComponents: (libraryId) => {
+    const requestId = uuidv4();
+    const known = Object.keys(get().thumbnailsMap);
+    set({ componentsRequestId: requestId });
+    penpotApi.getComponents(requestId, libraryId, known);
+  },
+  setThumbnail: (requestId, componentId, thumbnail) =>
     set((state) => {
+      // Late thumbnails from a superseded request are still valid images —
+      // cache them, but only the current request drives the pending set.
       const next = new Set(state.thumbnailsPending);
-      next.delete(componentId);
+      if (requestId === state.componentsRequestId) next.delete(componentId);
       return {
         thumbnailsMap: { ...state.thumbnailsMap, [componentId]: thumbnail },
         thumbnailsPending: next,
       };
     }),
-  setPendingThumbnails: (ids) => set({ thumbnailsPending: new Set(ids) }),
-  clearThumbnails: () => set({ thumbnailsMap: {}, thumbnailsPending: new Set() }),
+  finishThumbnails: (requestId) =>
+    set((state) =>
+      requestId === state.componentsRequestId ? { thumbnailsPending: new Set<string>() } : state
+    ),
+
+  notices: [],
+  pushNotice: (kind, message, details) =>
+    set((state) => ({
+      // Keep the stack short; the newest notice is last.
+      notices: [...state.notices.slice(-3), { id: uuidv4(), kind, message, details }],
+    })),
+  dismissNotice: (id) => set((state) => ({ notices: state.notices.filter((n) => n.id !== id) })),
 
   selectedComponentIds: new Set(),
   selectedComponentLibraryMap: {},
@@ -282,6 +341,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         done: 0,
         failed: 0,
         errors: [],
+        warnings: [],
         status: 'running',
         currentComponentName: items[0]?.componentName,
       },
@@ -298,7 +358,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         },
       };
     }),
-  reportImportItem: (requestId, payload) =>
+  reportImportItem: (requestId, payload, warnings) =>
     set((state) => {
       if (!state.importJob || state.importJob.requestId !== requestId) return state;
       const key = cacheKey(payload.libraryId, payload.componentId);
@@ -310,6 +370,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         importJob: {
           ...state.importJob,
           done: state.importJob.done + 1,
+          warnings: [...state.importJob.warnings, ...warnings],
         },
       };
     }),
@@ -356,8 +417,16 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         future: [],
       },
     })),
+  commitHistoryCoalesced: (key) => {
+    const now = Date.now();
+    const prev = lastCoalesced;
+    lastCoalesced = { key, at: now };
+    if (prev && prev.key === key && now - prev.at < HISTORY_COALESCE_MS) return;
+    get().commitHistory();
+  },
   undo: () =>
     set((state) => {
+      lastCoalesced = null;
       const { past, future } = state.history;
       if (past.length === 0) return {};
       const prev = past[past.length - 1];
@@ -379,6 +448,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     }),
   redo: () =>
     set((state) => {
+      lastCoalesced = null;
       const { past, future } = state.history;
       if (future.length === 0) return {};
       const next = future[0];
@@ -504,7 +574,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   // ── Export ─────────────────────────────────────────────────────────────────
   exportSettings: {
     spacing: 100,
-    groupIntoSection: true,
+    wrapInDeck: true,
     createNewPage: false,
     slidePrefix: 'Slide',
   },
