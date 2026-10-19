@@ -34,6 +34,8 @@ export interface Notice {
   details?: string[];
 }
 export type SidePanel = 'properties' | 'layers' | 'insert';
+// Main area of the editor: one slide on the canvas, or every slide in a grid.
+export type EditorView = 'canvas' | 'grid';
 
 export interface InsertResult {
   count: number;
@@ -93,7 +95,7 @@ function mapNodes(
 
 // Node arrays are ordered bottom→top, exactly like Penpot `children`: a
 // higher index paints in front. 'forward' moves one step towards the front.
-export type StackDirection = 'forward' | 'backward';
+export type StackDirection = 'forward' | 'backward' | 'front' | 'back';
 
 function reorderSiblings(
   nodes: SlideNode[],
@@ -102,10 +104,15 @@ function reorderSiblings(
 ): { nodes: SlideNode[]; moved: boolean } {
   const idx = nodes.findIndex((n) => n.id === nodeId);
   if (idx !== -1) {
-    const target = direction === 'forward' ? idx + 1 : idx - 1;
-    if (target < 0 || target >= nodes.length) return { nodes, moved: true };
+    const target =
+      direction === 'forward' ? idx + 1
+      : direction === 'backward' ? idx - 1
+      : direction === 'front' ? nodes.length - 1
+      : 0;
+    if (target < 0 || target >= nodes.length || target === idx) return { nodes, moved: true };
     const next = [...nodes];
-    [next[idx], next[target]] = [next[target], next[idx]];
+    const [node] = next.splice(idx, 1);
+    next.splice(target, 0, node);
     return { nodes: next, moved: true };
   }
   // Recurse into groups
@@ -291,10 +298,17 @@ interface SlideStore {
   duplicateSlide: (id: string) => void;
   reorderSlides: (fromIndex: number, toIndex: number) => void;
   setActiveSlide: (id: string | null) => void;
+  editorView: EditorView;
+  setEditorView: (view: EditorView) => void;
+  // Index of the slide the presentation is showing; null when not presenting.
+  presenting: number | null;
+  setPresenting: (index: number | null) => void;
 
   // ── Nodes ──────────────────────────────────────────────────────────────────
   addNode: (slideId: string, node: SlideNode) => void;
   updateNode: (slideId: string, nodeId: string, updates: Partial<SlideNode>) => void;
+  // Shift several nodes at once (drag, nudge, align) in one store update.
+  moveNodes: (slideId: string, moves: Map<string, { dx: number; dy: number }>) => void;
   deleteNode: (slideId: string, nodeId: string) => void;
   reorderNode: (slideId: string, nodeId: string, direction: StackDirection) => void;
   selectNode: (nodeId: string | null) => void;
@@ -392,6 +406,8 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       slides: [],
       activeSlideId: null,
       selectedNodeIds: [],
+      editorView: 'canvas',
+      presenting: null,
       history: EMPTY_HISTORY,
       screen: 'home',
     }),
@@ -737,6 +753,10 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       return { slides: next };
     }),
   setActiveSlide: (activeSlideId) => set({ activeSlideId, selectedNodeIds: [] }),
+  editorView: 'canvas',
+  setEditorView: (editorView) => set({ editorView, selectedNodeIds: [] }),
+  presenting: null,
+  setPresenting: (presenting) => set({ presenting }),
 
   // ── Nodes ──────────────────────────────────────────────────────────────────
   addNode: (slideId, node) =>
@@ -751,6 +771,18 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
           : s
       ),
     })),
+  moveNodes: (slideId, moves) => {
+    if (moves.size === 0) return;
+    const shift = (nodes: SlideNode[]): SlideNode[] =>
+      nodes.map((n) => {
+        const m = moves.get(n.id);
+        const moved = m ? { ...n, x: n.x + m.dx, y: n.y + m.dy } : n;
+        return n.children?.length ? { ...moved, children: shift(n.children) } : moved;
+      });
+    set((state) => ({
+      slides: state.slides.map((s) => (s.id === slideId ? { ...s, nodes: shift(s.nodes) } : s)),
+    }));
+  },
   deleteNode: (slideId, nodeId) =>
     set((state) => ({
       slides: state.slides.map((s) =>

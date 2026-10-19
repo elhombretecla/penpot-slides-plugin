@@ -13,7 +13,17 @@ import {
   nodeBackground,
   slideBackgroundCss,
 } from '../utils';
-import { cloneNodeWithNewIds } from '../deck';
+import { dropDominatedIds, freeCopies, useCanvasCommands } from '../canvas/commands';
+import {
+  placeNodes,
+  snapBox,
+  snapTargets,
+  subtreeIds,
+  unionBox,
+  type Guide,
+  type PlacedBox,
+} from '../canvas/geometry';
+import CanvasContextMenu from './CanvasContextMenu';
 import { planRender, type RenderPlan } from '../render/plan';
 import { useRenderStore } from '../render/renderer';
 import SvgView from './SvgView';
@@ -31,28 +41,24 @@ const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 8;
 const ZOOM_STEP = 1.2;
 
-// Distance (in slide units) each successive paste shifts so the user can see
-// the new copy instead of it stacking invisibly on top of the original.
-const PASTE_OFFSET = 20;
-
 // Screen pixels the pointer must travel before a press on a node becomes a
 // move or a resize.
 const DRAG_THRESHOLD_PX = 3;
 
-// Drop selected ids whose ancestor is also selected — avoids double-pasting
-// a child that's already coming along inside its parent's clone.
-function dropDominatedIds(nodes: SlideNode[], ids: string[]): string[] {
-  const selected = new Set(ids);
-  const dominated = new Set<string>();
-  const visit = (ns: SlideNode[], parentSelected: boolean) => {
-    for (const n of ns) {
-      const isSel = selected.has(n.id);
-      if (isSel && parentSelected) dominated.add(n.id);
-      if (n.children) visit(n.children, isSel || parentSelected);
-    }
-  };
-  visit(nodes, false);
-  return ids.filter((id) => !dominated.has(id));
+// Snapping distance to guides, in screen pixels.
+const SNAP_PX = 6;
+
+// Current version of some nodes of a slide (drag deltas are applied to what
+// the store holds now).
+function findNodes(slides: Slide[], slideId: string, ids: string[]): Map<string, SlideNode> {
+  const out = new Map<string, SlideNode>();
+  const slide = slides.find((s) => s.id === slideId);
+  if (!slide) return out;
+  for (const id of ids) {
+    const n = findNodeById(slide.nodes, id);
+    if (n) out.set(id, n);
+  }
+  return out;
 }
 
 function clampZoom(z: number) {
@@ -65,6 +71,10 @@ export default function SlideCanvas({ slide }: Props) {
   // Node under the pointer: outlined like in Penpot, so it is clear what a
   // click will select (nested slots included).
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
+  // Smart guides shown while moving or resizing.
+  const [guides, setGuides] = useState<Guide[]>([]);
+  // Context menu, at a viewport position.
+  const [menu, setMenu] = useState<{ x: number; y: number; slideX: number; slideY: number } | null>(null);
   // User-controlled zoom multiplier applied on top of the fit-to-viewport
   // scale. 1 = slide exactly fits the wrapper; larger values pan via
   // wrapper's overflow:auto.
@@ -76,7 +86,7 @@ export default function SlideCanvas({ slide }: Props) {
   const setSelectedNodes = useSlideStore((s) => s.setSelectedNodes);
   const addNode = useSlideStore((s) => s.addNode);
   const updateNode = useSlideStore((s) => s.updateNode);
-  const deleteNode = useSlideStore((s) => s.deleteNode);
+  const moveNodes = useSlideStore((s) => s.moveNodes);
   const commitHistory = useSlideStore((s) => s.commitHistory);
   const undo = useSlideStore((s) => s.undo);
   const redo = useSlideStore((s) => s.redo);
@@ -129,129 +139,9 @@ export default function SlideCanvas({ slide }: Props) {
     return () => window.removeEventListener('keydown', handler);
   }, [undo, redo, zoomIn, zoomOut, zoomReset]);
 
-  // Backspace / Delete removes every node in the current selection. Guarded
-  // against input-like focus so typing into text fields (including the inline
-  // text editor) still routes normally. Collapses into one history entry.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      const tag = t?.tagName;
-      const editable = t?.isContentEditable;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
-      if (editingNodeId) return;
-      if (!slide || selectedNodeIds.length === 0) return;
-      e.preventDefault();
-      commitHistory();
-      const slideId = slide.id;
-      for (const id of selectedNodeIds) deleteNode(slideId, id);
-      setSelectedNodes([]);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [slide, selectedNodeIds, editingNodeId, commitHistory, deleteNode, setSelectedNodes]);
-
   const canvasRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const wrapperSize = useElementSize(wrapperRef);
-
-  // In-memory clipboard. Each entry is a deep-cloned node plus the absolute
-  // slide position it should paste at — starts as the source's absolute
-  // position and advances by PASTE_OFFSET after every paste so consecutive
-  // pastes stagger visibly.
-  const clipboardRef = useRef<Array<{ node: SlideNode; absX: number; absY: number }>>([]);
-
-  // Ctrl/Cmd + C copies the current selection; Ctrl/Cmd + V pastes. Pastes
-  // always land at the top of the stack on the active slide as flat
-  // top-level nodes (children lifted out of groups keep their original
-  // absolute position) and become the new selection, in one undoable step.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
-      const key = e.key.toLowerCase();
-      if (key !== 'c' && key !== 'v') return;
-      const t = e.target as HTMLElement | null;
-      const tag = t?.tagName;
-      const editable = t?.isContentEditable;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
-      if (editingNodeId) return;
-      if (!slide) return;
-
-      if (key === 'c') {
-        if (selectedNodeIds.length === 0) return;
-        e.preventDefault();
-        const ids = dropDominatedIds(slide.nodes, selectedNodeIds);
-        const items: Array<{ node: SlideNode; absX: number; absY: number }> = [];
-        for (const id of ids) {
-          const found = findNodeAbs(slide.nodes, id);
-          if (!found) continue;
-          items.push({
-            // A copy is a new element, not the template slot it came from.
-            node: cloneNodeWithNewIds(found.node, false),
-            absX: found.absX,
-            absY: found.absY,
-          });
-        }
-        if (items.length > 0) clipboardRef.current = items;
-        return;
-      }
-
-      // key === 'v'
-      if (clipboardRef.current.length === 0) return;
-      e.preventDefault();
-      commitHistory();
-      const slideId = slide.id;
-
-      // Anchor the pasted cluster's bounding-box center to the mouse when the
-      // pointer is over the slide; otherwise advance by PASTE_OFFSET so
-      // keyboard-only users still see each paste as a visible stagger.
-      const mousePos = mouseSlidePosRef.current;
-      let dx: number;
-      let dy: number;
-      if (mousePos) {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (const item of clipboardRef.current) {
-          if (item.absX < minX) minX = item.absX;
-          if (item.absY < minY) minY = item.absY;
-          if (item.absX + item.node.width > maxX) maxX = item.absX + item.node.width;
-          if (item.absY + item.node.height > maxY) maxY = item.absY + item.node.height;
-        }
-        const cx = (minX + maxX) / 2;
-        const cy = (minY + maxY) / 2;
-        dx = mousePos.x - cx;
-        dy = mousePos.y - cy;
-      } else {
-        dx = PASTE_OFFSET;
-        dy = PASTE_OFFSET;
-      }
-
-      const newIds: string[] = [];
-      for (const item of clipboardRef.current) {
-        const fresh = cloneNodeWithNewIds(item.node, false);
-        fresh.x = item.absX + dx;
-        fresh.y = item.absY + dy;
-        addNode(slideId, fresh);
-        newIds.push(fresh.id);
-      }
-      // For keyboard-only fallback, advance the stored positions so the next
-      // paste staggers again. Mouse-anchored paste leaves them alone — the
-      // cursor decides where the next paste goes.
-      if (!mousePos) {
-        clipboardRef.current = clipboardRef.current.map((c) => ({
-          ...c,
-          absX: c.absX + PASTE_OFFSET,
-          absY: c.absY + PASTE_OFFSET,
-        }));
-      }
-      setSelectedNodes(newIds);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [slide, selectedNodeIds, editingNodeId, addNode, commitHistory, setSelectedNodes]);
 
   // Ctrl/Cmd + wheel zoom. React's synthetic wheel listener is passive in
   // modern React, which blocks preventDefault — attach a native listener with
@@ -284,6 +174,18 @@ export default function SlideCanvas({ slide }: Props) {
   // the canvas. Used by paste to drop the clipboard under the cursor. Null
   // when the pointer is outside the slide.
   const mouseSlidePosRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Each edit session (between opening the text and leaving it) is one
+  // undoable step regardless of how many keystrokes happen.
+  const startEditing = useCallback(
+    (id: string) => {
+      commitHistory();
+      setEditingNodeId(id);
+      selectNode(id);
+    },
+    [commitHistory, selectNode]
+  );
+  const commands = useCanvasCommands(slide, editingNodeId, startEditing, mouseSlidePosRef);
 
   // Every hook below must run on every render (Rules of Hooks), so the
   // "no slide" early return lives right before the JSX, not here. Geometry
@@ -320,7 +222,8 @@ export default function SlideCanvas({ slide }: Props) {
 
   const handleCanvasMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!canvasRef.current) return;
+      if (!canvasRef.current || e.button !== 0) return;
+      setMenu(null);
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
@@ -454,6 +357,13 @@ export default function SlideCanvas({ slide }: Props) {
       if (activeTool !== 'select') return;
       e.stopPropagation();
       setEditingNodeId(null);
+      setMenu(null);
+
+      // Right press: select for the context menu, never drag.
+      if (e.button !== 0) {
+        if (!selectedNodeIds.includes(id)) setSelectedNodes([id]);
+        return;
+      }
 
       const alreadySelected = selectedNodeIds.includes(id);
 
@@ -480,72 +390,89 @@ export default function SlideCanvas({ slide }: Props) {
       if (!nextSelection.includes(id)) return;
 
       if (!slide) return;
-      // Snapshot positions for everyone in the active selection; we anchor
-      // each to its own origin at mousedown and apply the cumulative delta
-      // every frame.
-      const snapshot = new Map<string, { x: number; y: number }>();
-      for (const nid of nextSelection) {
-        const n = findNodeById(slide.nodes, nid);
-        if (n) snapshot.set(nid, { x: n.x, y: n.y });
-      }
-      if (snapshot.size === 0) return;
-
+      const slideId = slide.id;
       const startX = e.clientX;
       const startY = e.clientY;
-      const slideId = slide.id;
+      const duplicateOnDrag = e.altKey;
 
-      // Snapshot slides state BEFORE the drag actually mutates anything, so an
-      // undo jumps back to the pre-drag arrangement. The many updateNode calls
-      // during the gesture collapse into this single history entry.
-      let committed = false;
+      // Everyone in the selection moves from its own origin by the same
+      // delta; a child selected with its parent moves only with the parent.
+      let ids = dropDominatedIds(slide.nodes, nextSelection);
+      const placed = placeNodes(slide.nodes);
+      const byId = new Map(placed.map((p) => [p.id, p]));
+      let origins = new Map<string, { x: number; y: number }>();
+      for (const nid of ids) {
+        const p = byId.get(nid);
+        if (p) origins.set(nid, { x: p.node.x, y: p.node.y });
+      }
+      if (origins.size === 0) return;
+      const startBox = unionBox(ids.map((nid) => byId.get(nid)).filter((p): p is PlacedBox => !!p));
+      const targets = snapTargets(placed, subtreeIds(slide.nodes, ids), slide.width, slide.height);
+
+      // History is committed on the first real movement only, so the whole
+      // gesture is one undo step and a plain click is none.
+      let started = false;
 
       const onMove = (me: MouseEvent) => {
         // A click is never a move: hand jitter would otherwise nudge the node
         // by a pixel, mark it edited and swap its Penpot render for HTML.
-        if (!committed) {
+        if (!started) {
           if (Math.hypot(me.clientX - startX, me.clientY - startY) < DRAG_THRESHOLD_PX) return;
           commitHistory();
-          committed = true;
+          started = true;
+          // Alt-drag leaves the originals in place and moves copies.
+          if (duplicateOnDrag || me.altKey) {
+            const copies = freeCopies(slide, ids);
+            origins = new Map();
+            for (const c of copies) {
+              c.node.x = c.absX;
+              c.node.y = c.absY;
+              addNode(slideId, c.node);
+              origins.set(c.node.id, { x: c.absX, y: c.absY });
+            }
+            ids = copies.map((c) => c.node.id);
+            setSelectedNodes(ids);
+          }
         }
-        const dx = (me.clientX - startX) / scale;
-        const dy = (me.clientY - startY) / scale;
-        snapshot.forEach((pos, nid) => {
-          updateNode(slideId, nid, { x: pos.x + dx, y: pos.y + dy });
+        let dx = (me.clientX - startX) / scale;
+        let dy = (me.clientY - startY) / scale;
+        // Shift keeps the move on one axis.
+        const lock = me.shiftKey ? (Math.abs(dx) >= Math.abs(dy) ? 'y' : 'x') : null;
+        if (lock === 'y') dy = 0;
+        if (lock === 'x') dx = 0;
+        let shown: Guide[] = [];
+        // Ctrl / Cmd moves freely, without snapping.
+        if (startBox && !(me.ctrlKey || me.metaKey)) {
+          const snap = snapBox({ ...startBox, x: startBox.x + dx, y: startBox.y + dy }, targets, SNAP_PX / scale);
+          if (lock !== 'x') dx += snap.dx;
+          if (lock !== 'y') dy += snap.dy;
+          shown = snap.guides.filter((g) => g.axis !== lock);
+        }
+        setGuides(shown);
+        const moves = new Map<string, { dx: number; dy: number }>();
+        const current = findNodes(useSlideStore.getState().slides, slideId, ids);
+        origins.forEach((o, nid) => {
+          const n = current.get(nid);
+          if (n) moves.set(nid, { dx: o.x + dx - n.x, dy: o.y + dy - n.y });
         });
+        moveNodes(slideId, moves);
       };
       const onUp = () => {
+        // A plain click on one element of a multiple selection keeps just
+        // that one (the selection stays only for a drag).
+        if (!started && !e.shiftKey && nextSelection.length > 1) setSelectedNodes([id]);
+        setGuides([]);
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
       };
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     },
-    [activeTool, commitHistory, selectedNodeIds, setSelectedNodes, slide, scale, updateNode]
+    [activeTool, addNode, commitHistory, moveNodes, selectedNodeIds, setSelectedNodes, slide, scale]
   );
 
   useKeyboardTools(setActiveTool);
 
-  // Enter opens the selected text for typing; Escape drops the selection
-  // (the editor handles its own Escape).
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || editingNodeId) return;
-      const t = e.target as HTMLElement | null;
-      const tag = t?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || t?.isContentEditable) return;
-      if (e.key === 'Escape' && selectedNodeIds.length > 0) {
-        setSelectedNodes([]);
-      } else if (e.key === 'Enter' && slide && selectedNodeIds.length === 1) {
-        const node = findNodeById(slide.nodes, selectedNodeIds[0]);
-        if (node?.type !== 'text') return;
-        e.preventDefault();
-        commitHistory();
-        setEditingNodeId(node.id);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [slide, selectedNodeIds, editingNodeId, commitHistory, setSelectedNodes]);
 
   if (!slide) {
     return (
@@ -684,6 +611,20 @@ export default function SlideCanvas({ slide }: Props) {
             mouseSlidePosRef.current = null;
             setHoverNodeId(null);
           }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            if (activeTool !== 'select' || !canvasRef.current) return;
+            const onNode = (e.target as HTMLElement).closest('[data-node-id]');
+            if (!onNode) setSelectedNodes([]);
+            setEditingNodeId(null);
+            const rect = canvasRef.current.getBoundingClientRect();
+            setMenu({
+              x: e.clientX,
+              y: e.clientY,
+              slideX: (e.clientX - rect.left) / scale,
+              slideY: (e.clientY - rect.top) / scale,
+            });
+          }}
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
           {plan && <SvgView svg={plan.render.svg} hiddenNodes={plan.hidden} className="canvas-render" />}
@@ -698,13 +639,7 @@ export default function SlideCanvas({ slide }: Props) {
                 activeTool={activeTool}
                 editingNodeId={editingNodeId}
                 onNodeMouseDown={handleNodeMouseDown}
-                onStartEditing={(id) => {
-                  // Each edit session (between double-click and blur) is one
-                  // undoable step regardless of how many keystrokes happen.
-                  commitHistory();
-                  setEditingNodeId(id);
-                  selectNode(id);
-                }}
+                onStartEditing={startEditing}
                 onStopEditing={() => setEditingNodeId(null)}
                 onTextChange={(id, text) => updateNode(slide.id, id, { text })}
               />
@@ -732,10 +667,25 @@ export default function SlideCanvas({ slide }: Props) {
           hoverId={activeTool === 'select' && !canvasDragRect ? hoverNodeId : null}
           editingId={editingNodeId}
           scale={scale}
+          slideWidth={slide.width}
+          slideHeight={slide.height}
+          guides={guides}
+          onGuides={setGuides}
           handles={activeTool === 'select'}
           onResize={(id, patch) => updateNode(slide.id, id, patch)}
           onCommit={commitHistory}
         />
+        {menu && (
+          <CanvasContextMenu
+            x={menu.x}
+            y={menu.y}
+            slide={slide}
+            selectedIds={selectedNodeIds}
+            commands={commands}
+            onPasteHere={() => commands.paste({ x: menu.slideX, y: menu.slideY })}
+            onClose={() => setMenu(null)}
+          />
+        )}
         </div>
       </div>
     </div>
@@ -1096,13 +1046,17 @@ interface SelectionOverlayProps {
   hoverId: string | null;
   editingId: string | null;
   scale: number;
+  slideWidth: number;
+  slideHeight: number;
+  guides: Guide[];
+  onGuides: (guides: Guide[]) => void;
   handles: boolean;
   onResize: (id: string, patch: Partial<SlideNode>) => void;
   onCommit: () => void;
 }
 
 function SelectionOverlay({
-  nodes, selectedIds, hoverId, editingId, scale, handles, onResize, onCommit,
+  nodes, selectedIds, hoverId, editingId, scale, slideWidth, slideHeight, guides, onGuides, handles, onResize, onCommit,
 }: SelectionOverlayProps) {
   const boxStyle = (absX: number, absY: number, node: SlideNode): React.CSSProperties => ({
     position: 'absolute',
@@ -1130,12 +1084,27 @@ function SelectionOverlay({
           {handles && selectedIds.length === 1 && (
             <ResizeHandles
               node={node}
+              nodes={nodes}
+              slideWidth={slideWidth}
+              slideHeight={slideHeight}
               scale={scale}
+              onGuides={onGuides}
               onResize={(patch) => onResize(node.id, patch)}
               onCommit={onCommit}
             />
           )}
         </div>
+      ))}
+      {guides.map((g, i) => (
+        <div
+          key={i}
+          className="canvas-guide"
+          style={
+            g.axis === 'x'
+              ? { left: g.at * scale, top: g.from * scale, width: 1, height: Math.max(1, (g.to - g.from) * scale) }
+              : { top: g.at * scale, left: g.from * scale, height: 1, width: Math.max(1, (g.to - g.from) * scale) }
+          }
+        />
       ))}
     </div>
   );
@@ -1164,12 +1133,16 @@ const MIN_SIZE = 8;
 
 interface ResizeHandlesProps {
   node: SlideNode;
+  nodes: SlideNode[];
+  slideWidth: number;
+  slideHeight: number;
   scale: number;
+  onGuides: (guides: Guide[]) => void;
   onResize: (patch: Partial<SlideNode>) => void;
   onCommit: () => void;
 }
 
-function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) {
+function ResizeHandles({ node, nodes, slideWidth, slideHeight, scale, onGuides, onResize, onCommit }: ResizeHandlesProps) {
   const startResize = useCallback(
     (dir: HandleDir, e: React.MouseEvent) => {
       e.stopPropagation();
@@ -1181,6 +1154,19 @@ function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) 
       const origY = node.y;
       const origW = node.width;
       const origH = node.height;
+      const ratio = origW / Math.max(origH, 0.0001);
+      const corner = dir.length === 2;
+
+      // Moving edges snap to the slide and the other elements.
+      const placed = placeNodes(nodes);
+      const self = placed.find((p) => p.id === node.id);
+      const parentX = self?.parentX ?? 0;
+      const parentY = self?.parentY ?? 0;
+      const targets = snapTargets(placed, subtreeIds(nodes, [node.id]), slideWidth, slideHeight);
+      const edges = {
+        x: dir.includes('w') ? ['start' as const] : dir.includes('e') ? ['end' as const] : [],
+        y: dir.includes('n') ? ['start' as const] : dir.includes('s') ? ['end' as const] : [],
+      };
 
       // Keep the cursor consistent for the whole gesture, even when the mouse
       // leaves the handle itself.
@@ -1218,6 +1204,26 @@ function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) 
           h = origH + dy;
         }
 
+        let shown: Guide[] = [];
+        if (me.shiftKey && corner) {
+          // Shift keeps the proportions, following the dominant axis.
+          if (Math.abs(w - origW) / origW >= Math.abs(h - origH) / Math.max(origH, 0.0001)) {
+            h = w / ratio;
+          } else {
+            w = h * ratio;
+          }
+          if (dir.includes('w')) x = origX + origW - w;
+          if (dir.includes('n')) y = origY + origH - h;
+        } else if (!(me.ctrlKey || me.metaKey)) {
+          const snap = snapBox({ x: parentX + x, y: parentY + y, width: w, height: h }, targets, SNAP_PX / scale, edges);
+          if (dir.includes('w')) { x += snap.dx; w -= snap.dx; }
+          if (dir.includes('e')) w += snap.dx;
+          if (dir.includes('n')) { y += snap.dy; h -= snap.dy; }
+          if (dir.includes('s')) h += snap.dy;
+          shown = snap.guides;
+        }
+        onGuides(shown);
+
         // Clamp against MIN_SIZE while keeping the opposite edge anchored.
         if (w < MIN_SIZE) {
           if (dir.includes('w')) x = origX + origW - MIN_SIZE;
@@ -1232,6 +1238,7 @@ function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) 
       };
 
       const onUp = () => {
+        onGuides([]);
         document.body.style.cursor = prevBodyCursor;
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
@@ -1240,7 +1247,7 @@ function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) 
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     },
-    [node.x, node.y, node.width, node.height, onResize, onCommit, scale]
+    [node.id, node.x, node.y, node.width, node.height, nodes, slideWidth, slideHeight, onGuides, onResize, onCommit, scale]
   );
 
   const size = 8;

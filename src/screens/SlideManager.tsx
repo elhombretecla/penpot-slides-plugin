@@ -11,6 +11,8 @@ import InsertPanel from '../components/InsertPanel';
 import ExportPanel from '../components/ExportPanel';
 import Thumbnail from '../components/Thumbnail';
 import RenderToggle from '../components/RenderToggle';
+import SlideGrid from '../components/SlideGrid';
+import Presenter from '../components/Presenter';
 
 export default function SlideManager() {
   const slides = useSlideStore((s) => s.slides);
@@ -23,6 +25,10 @@ export default function SlideManager() {
   const deck = useSlideStore((s) => s.deck);
   const requestCatalog = useSlideStore((s) => s.requestCatalog);
   const hasCatalog = useSlideStore((s) => !!(s.deck?.libraryId && s.catalogs[s.deck.libraryId]));
+  const editorView = useSlideStore((s) => s.editorView);
+  const setEditorView = useSlideStore((s) => s.setEditorView);
+  const presenting = useSlideStore((s) => s.presenting);
+  const setPresenting = useSlideStore((s) => s.setPresenting);
 
   const activeSlide = slides.find((s) => s.id === activeSlideId) ?? null;
 
@@ -30,6 +36,28 @@ export default function SlideManager() {
   useEffect(() => {
     if (deck?.libraryId && !hasCatalog) requestCatalog(deck.libraryId);
   }, [deck?.libraryId, hasCatalog, requestCatalog]);
+
+  // Page Up / Page Down walk the deck from anywhere but text fields.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+      const t = e.target as HTMLElement | null;
+      if (t?.tagName === 'INPUT' || t?.tagName === 'TEXTAREA' || t?.isContentEditable) return;
+      const { slides: all, activeSlideId: active, setActiveSlide } = useSlideStore.getState();
+      const i = all.findIndex((x) => x.id === active);
+      const next = all[i + (e.key === 'PageDown' ? 1 : -1)];
+      if (!next) return;
+      e.preventDefault();
+      setActiveSlide(next.id);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  function present() {
+    const i = slides.findIndex((x) => x.id === activeSlideId);
+    setPresenting(Math.max(0, i));
+  }
 
   function handleBack() {
     flushSave();
@@ -50,6 +78,40 @@ export default function SlideManager() {
         <SaveIndicator />
 
         <div className="manager-topbar-actions">
+          <div className="view-switch" role="group" aria-label="View">
+            <button
+              className={`view-switch-btn${editorView === 'canvas' ? ' active' : ''}`}
+              onClick={() => setEditorView('canvas')}
+              title="Editor"
+              aria-pressed={editorView === 'canvas'}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="11" height="16" rx="1" />
+              </svg>
+            </button>
+            <button
+              className={`view-switch-btn${editorView === 'grid' ? ' active' : ''}`}
+              onClick={() => setEditorView('grid')}
+              title="Grid view (reorder slides)"
+              aria-pressed={editorView === 'grid'}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="4" width="8" height="7" rx="1" /><rect x="13" y="4" width="8" height="7" rx="1" />
+                <rect x="3" y="13" width="8" height="7" rx="1" /><rect x="13" y="13" width="8" height="7" rx="1" />
+              </svg>
+            </button>
+          </div>
+          <button
+            data-appearance="secondary"
+            onClick={present}
+            disabled={slides.length === 0}
+            title="Present from the current slide"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <path d="M7 4v16l13-8z" />
+            </svg>
+            Present
+          </button>
           <RenderToggle slide={activeSlide} />
           <button
             data-appearance="primary"
@@ -66,10 +128,12 @@ export default function SlideManager() {
       </div>
 
       <div className="manager-body">
-        <div className="manager-slide-list">
-          <SlideList />
-          <AddSlideMenu />
-        </div>
+        {editorView === 'canvas' && (
+          <div className="manager-slide-list">
+            <SlideList />
+            <AddSlideMenu />
+          </div>
+        )}
 
         <div className="manager-canvas-area">
           {slides.length === 0 ? (
@@ -92,6 +156,13 @@ export default function SlideManager() {
                 </button>
               </div>
             </div>
+          ) : editorView === 'grid' ? (
+            <>
+              <SlideGrid />
+              <div className="slide-grid-footer">
+                <AddSlideMenu />
+              </div>
+            </>
           ) : (
             <>
               <SlideCanvas slide={activeSlide} />
@@ -119,6 +190,7 @@ export default function SlideManager() {
       </div>
 
       {showExportPanel && <ExportOverlay />}
+      {presenting !== null && <Presenter />}
     </div>
   );
 }

@@ -16,6 +16,7 @@ import { penpotApi } from '../api';
 import { createLibraryColor, createTextStyle } from '../libraryAssets';
 import ColorField from './ColorField';
 import FontPicker, { closestVariant, useFonts } from './FontPicker';
+import AlignBar from './AlignBar';
 
 interface Props { slide: Slide | null; }
 
@@ -148,6 +149,7 @@ export default function PropertiesPanel({ slide }: Props) {
 
   return (
     <div className="properties-panel">
+      {selectedNodeIds.length > 0 && <AlignBar slide={slide} />}
       {selectedNodeIds.length > 1 ? (
         <p className="panel-empty-msg">{selectedNodeIds.length} elements selected</p>
       ) : !selectedNode ? (

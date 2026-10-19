@@ -74,6 +74,7 @@ export default function SlideList() {
   return (
     <div
       className="slide-list"
+      onKeyDown={(e) => handleSlideKeys(e, slides, activeSlideId)}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
       onDragLeave={handleListDragLeave}
@@ -103,6 +104,65 @@ export default function SlideList() {
       ))}
     </div>
   );
+}
+
+// Keyboard on a focused slide: arrows walk the deck, Ctrl+arrows move the
+// slide, Delete removes it and Ctrl+D duplicates it (as in Google Slides).
+// Shared by the slide strip and the grid view.
+export function handleSlideKeys(
+  e: React.KeyboardEvent,
+  slides: Slide[],
+  activeSlideId: string | null,
+  columns = 1
+) {
+  const target = e.target as HTMLElement;
+  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+  const store = useSlideStore.getState();
+  const index = slides.findIndex((s) => s.id === activeSlideId);
+  if (index === -1) return;
+  const mod = e.ctrlKey || e.metaKey;
+  const back = e.key === 'ArrowUp' || e.key === 'ArrowLeft';
+  const fwd = e.key === 'ArrowDown' || e.key === 'ArrowRight';
+  const step = e.key === 'ArrowUp' || e.key === 'ArrowDown' ? columns : 1;
+  let focusIndex: number | null = null;
+
+  if ((back || fwd) && mod) {
+    const to = Math.max(0, Math.min(slides.length - 1, index + (fwd ? step : -step)));
+    if (to !== index) {
+      store.commitHistory();
+      store.reorderSlides(index, to);
+    }
+    focusIndex = to;
+  } else if (back || fwd) {
+    const to = Math.max(0, Math.min(slides.length - 1, index + (fwd ? step : -step)));
+    store.setActiveSlide(slides[to].id);
+    focusIndex = to;
+  } else if (e.key === 'Home' || e.key === 'End') {
+    const to = e.key === 'Home' ? 0 : slides.length - 1;
+    store.setActiveSlide(slides[to].id);
+    focusIndex = to;
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
+    store.commitHistory();
+    store.deleteSlide(slides[index].id);
+    focusIndex = Math.min(index, slides.length - 2);
+  } else if (mod && e.key.toLowerCase() === 'd') {
+    store.commitHistory();
+    store.duplicateSlide(slides[index].id);
+    focusIndex = index + 1;
+  } else {
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  // Keep the keyboard on the slides once React has re-rendered them.
+  const container = e.currentTarget as HTMLElement;
+  if (focusIndex !== null && focusIndex >= 0) {
+    requestAnimationFrame(() => {
+      const items = container.querySelectorAll<HTMLElement>('[data-slide-focus]');
+      items[focusIndex!]?.focus();
+      items[focusIndex!]?.scrollIntoView({ block: 'nearest' });
+    });
+  }
 }
 
 // ─── Slide Item ───────────────────────────────────────────────────────────────
@@ -156,6 +216,7 @@ function SlideItem({
 
       <button
         className="slide-thumbnail-btn"
+        data-slide-focus
         onClick={onSelect}
         title={slide.name}
       >
