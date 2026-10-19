@@ -35,6 +35,10 @@ const ZOOM_STEP = 1.2;
 // the new copy instead of it stacking invisibly on top of the original.
 const PASTE_OFFSET = 20;
 
+// Screen pixels the pointer must travel before a press on a node becomes a
+// move or a resize.
+const DRAG_THRESHOLD_PX = 3;
+
 // Drop selected ids whose ancestor is also selected — avoids double-pasting
 // a child that's already coming along inside its parent's clone.
 function dropDominatedIds(nodes: SlideNode[], ids: string[]): string[] {
@@ -58,6 +62,9 @@ function clampZoom(z: number) {
 export default function SlideCanvas({ slide }: Props) {
   const [activeTool, setActiveTool] = useState<Tool>('select');
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  // Node under the pointer: outlined like in Penpot, so it is clear what a
+  // click will select (nested slots included).
+  const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
   // User-controlled zoom multiplier applied on top of the fit-to-viewport
   // scale. 1 = slide exactly fits the wrapper; larger values pan via
   // wrapper's overflow:auto.
@@ -435,6 +442,8 @@ export default function SlideCanvas({ slide }: Props) {
     commitHistory();
     addNode(slideId, node);
     selectNode(node.id);
+    // A new text box is for typing: open it straight away.
+    if (node.type === 'text') setEditingNodeId(node.id);
   }
 
   // Unified mousedown handler for every node on the canvas. Owns both the
@@ -491,12 +500,15 @@ export default function SlideCanvas({ slide }: Props) {
       let committed = false;
 
       const onMove = (me: MouseEvent) => {
-        const dx = (me.clientX - startX) / scale;
-        const dy = (me.clientY - startY) / scale;
-        if (!committed && (dx !== 0 || dy !== 0)) {
+        // A click is never a move: hand jitter would otherwise nudge the node
+        // by a pixel, mark it edited and swap its Penpot render for HTML.
+        if (!committed) {
+          if (Math.hypot(me.clientX - startX, me.clientY - startY) < DRAG_THRESHOLD_PX) return;
           commitHistory();
           committed = true;
         }
+        const dx = (me.clientX - startX) / scale;
+        const dy = (me.clientY - startY) / scale;
         snapshot.forEach((pos, nid) => {
           updateNode(slideId, nid, { x: pos.x + dx, y: pos.y + dy });
         });
@@ -512,6 +524,28 @@ export default function SlideCanvas({ slide }: Props) {
   );
 
   useKeyboardTools(setActiveTool);
+
+  // Enter opens the selected text for typing; Escape drops the selection
+  // (the editor handles its own Escape).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || editingNodeId) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || t?.isContentEditable) return;
+      if (e.key === 'Escape' && selectedNodeIds.length > 0) {
+        setSelectedNodes([]);
+      } else if (e.key === 'Enter' && slide && selectedNodeIds.length === 1) {
+        const node = findNodeById(slide.nodes, selectedNodeIds[0]);
+        if (node?.type !== 'text') return;
+        e.preventDefault();
+        commitHistory();
+        setEditingNodeId(node.id);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [slide, selectedNodeIds, editingNodeId, commitHistory, setSelectedNodes]);
 
   if (!slide) {
     return (
@@ -627,6 +661,7 @@ export default function SlideCanvas({ slide }: Props) {
 
       {/* Canvas */}
       <div className="canvas-wrapper" ref={wrapperRef}>
+        <div className="canvas-stage" style={{ width: displayW, height: displayH }}>
         <div
           ref={canvasRef}
           className={`canvas-slide canvas-tool-${activeTool}`}
@@ -640,7 +675,15 @@ export default function SlideCanvas({ slide }: Props) {
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={handleCanvasMouseUp}
-          onMouseLeave={() => { mouseSlidePosRef.current = null; }}
+          onMouseOver={(e) => {
+            const el = (e.target as HTMLElement).closest<HTMLElement>('[data-node-id]');
+            const id = el?.dataset.nodeId ?? null;
+            if (id !== hoverNodeId) setHoverNodeId(id);
+          }}
+          onMouseLeave={() => {
+            mouseSlidePosRef.current = null;
+            setHoverNodeId(null);
+          }}
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
           {plan && <SvgView svg={plan.render.svg} hiddenNodes={plan.hidden} className="canvas-render" />}
@@ -653,7 +696,6 @@ export default function SlideCanvas({ slide }: Props) {
                 scale={scale}
                 slideId={slide.id}
                 activeTool={activeTool}
-                selectedNodeIds={selectedNodeIds}
                 editingNodeId={editingNodeId}
                 onNodeMouseDown={handleNodeMouseDown}
                 onStartEditing={(id) => {
@@ -665,8 +707,6 @@ export default function SlideCanvas({ slide }: Props) {
                 }}
                 onStopEditing={() => setEditingNodeId(null)}
                 onTextChange={(id, text) => updateNode(slide.id, id, { text })}
-                onResize={(id, patch) => updateNode(slide.id, id, patch)}
-                onCommitHistory={commitHistory}
               />
             ))}
 
@@ -685,6 +725,17 @@ export default function SlideCanvas({ slide }: Props) {
               }}
             />
           )}
+        </div>
+        <SelectionOverlay
+          nodes={slide.nodes}
+          selectedIds={selectedNodeIds}
+          hoverId={activeTool === 'select' && !canvasDragRect ? hoverNodeId : null}
+          editingId={editingNodeId}
+          scale={scale}
+          handles={activeTool === 'select'}
+          onResize={(id, patch) => updateNode(slide.id, id, patch)}
+          onCommit={commitHistory}
+        />
         </div>
       </div>
     </div>
@@ -723,26 +774,29 @@ export function SlidePreview({ slide, width }: { slide: Slide; width: number }) 
           scale={scale}
           slideId={slide.id}
           activeTool="select"
-          selectedNodeIds={EMPTY_IDS}
           editingNodeId={null}
           onNodeMouseDown={noop}
           onStartEditing={noop}
           onStopEditing={noop}
           onTextChange={noop}
-          onResize={noop}
-          onCommitHistory={noop}
         />
       ))}
     </div>
   );
 }
 
-const EMPTY_IDS: string[] = [];
-
 // Top-level node whose subtree contains `id`.
 function topLevelIdOf(nodes: SlideNode[], id: string): string | null {
   const contains = (n: SlideNode): boolean => n.id === id || (n.children ?? []).some(contains);
   return nodes.find(contains)?.id ?? null;
+}
+
+// Entering a text edit selects the whole text, as in Penpot and Slides; the
+// ref callback runs once per mounted editor, so later clicks keep their caret.
+function focusAndSelectAll(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.focus();
+  el.select();
 }
 
 // ─── Canvas Node (recursive) ──────────────────────────────────────────────────
@@ -755,14 +809,11 @@ interface CanvasNodeProps {
   scale: number;
   slideId: string;
   activeTool: Tool;
-  selectedNodeIds: string[];
   editingNodeId: string | null;
   onNodeMouseDown: (id: string, e: React.MouseEvent) => void;
   onStartEditing: (id: string) => void;
   onStopEditing: () => void;
   onTextChange: (id: string, text: string) => void;
-  onResize: (id: string, patch: Partial<SlideNode>) => void;
-  onCommitHistory: () => void;
 }
 
 function CanvasNode({
@@ -771,21 +822,23 @@ function CanvasNode({
   scale,
   slideId,
   activeTool,
-  selectedNodeIds,
   editingNodeId,
   onNodeMouseDown,
   onStartEditing,
   onStopEditing,
   onTextChange,
-  onResize,
-  onCommitHistory,
 }: CanvasNodeProps) {
-  const isSelected = selectedNodeIds.includes(node.id);
   const isEditing = editingNodeId === node.id;
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (isEditing) return;
+      // While typing, the press belongs to the text field (caret, selection
+      // drag): it must not reach a parent group, which would select and drag
+      // it and end the edit.
+      if (isEditing) {
+        e.stopPropagation();
+        return;
+      }
       onNodeMouseDown(node.id, e);
     },
     [isEditing, node.id, onNodeMouseDown]
@@ -795,9 +848,11 @@ function CanvasNode({
     (e: React.MouseEvent) => {
       if (node.type !== 'text') return;
       e.stopPropagation();
+      // Inside the editor a double-click is the native word selection.
+      if (isEditing) return;
       onStartEditing(node.id);
     },
-    [node.id, node.type, onStartEditing]
+    [isEditing, node.id, node.type, onStartEditing]
   );
 
   // After the hooks: hiding a layer must not change the hook call order.
@@ -815,11 +870,6 @@ function CanvasNode({
     userSelect: 'none',
     boxSizing: 'border-box',
   };
-
-  if (isSelected && !isEditing) {
-    wrapperStyle.outline = '2px solid #6457f0';
-    wrapperStyle.outlineOffset = '1px';
-  }
 
   // Groups render a container and recurse into children (children are
   // positioned relative to the group, so we just render them inside).
@@ -854,25 +904,14 @@ function CanvasNode({
               scale={scale}
               slideId={slideId}
               activeTool={activeTool}
-              selectedNodeIds={selectedNodeIds}
               editingNodeId={editingNodeId}
               onNodeMouseDown={onNodeMouseDown}
               onStartEditing={onStartEditing}
               onStopEditing={onStopEditing}
               onTextChange={onTextChange}
-              onResize={onResize}
-              onCommitHistory={onCommitHistory}
             />
           ))}
         </div>
-        {isSelected && !isEditing && activeTool === 'select' && (
-          <ResizeHandles
-            node={node}
-            scale={scale}
-            onResize={(patch) => onResize(node.id, patch)}
-            onCommit={onCommitHistory}
-          />
-        )}
       </div>
     );
   }
@@ -884,7 +923,7 @@ function CanvasNode({
         <div style={css}>
           {isEditing ? (
             <textarea
-              autoFocus
+              ref={focusAndSelectAll}
               className="canvas-text-editor"
               style={{
                 width: '100%',
@@ -908,6 +947,16 @@ function CanvasNode({
               onKeyDown={(e) => {
                 if (e.key === 'Escape') onStopEditing();
               }}
+              onMouseDown={(e) => {
+                // A press inside the selected text would start a native text
+                // drag instead of a new selection; collapse it first so the
+                // press places the caret and dragging selects, as in Penpot.
+                if (e.detail !== 1 || e.shiftKey) return;
+                const el = e.currentTarget;
+                el.setSelectionRange(el.selectionStart, el.selectionStart);
+              }}
+              onDragStart={(e) => e.preventDefault()}
+              onDoubleClick={(e) => e.stopPropagation()}
             />
           ) : (
             node.text
@@ -1032,14 +1081,62 @@ function CanvasNode({
       data-node-type={node.type}
     >
       {ghost ? <div className="canvas-node-ghost">{content}</div> : content}
-      {isSelected && !isEditing && activeTool === 'select' && (
-        <ResizeHandles
-          node={node}
-          scale={scale}
-          onResize={(patch) => onResize(node.id, patch)}
-          onCommit={onCommitHistory}
-        />
+    </div>
+  );
+}
+
+// ─── Selection overlay ────────────────────────────────────────────────────────
+
+// Selection and hover boxes live in their own layer above the slide, in
+// absolute slide coordinates: a group's clipping, the hidden HTML twin of a
+// Penpot-rendered node or the slide edge can no longer hide them.
+interface SelectionOverlayProps {
+  nodes: SlideNode[];
+  selectedIds: string[];
+  hoverId: string | null;
+  editingId: string | null;
+  scale: number;
+  handles: boolean;
+  onResize: (id: string, patch: Partial<SlideNode>) => void;
+  onCommit: () => void;
+}
+
+function SelectionOverlay({
+  nodes, selectedIds, hoverId, editingId, scale, handles, onResize, onCommit,
+}: SelectionOverlayProps) {
+  const boxStyle = (absX: number, absY: number, node: SlideNode): React.CSSProperties => ({
+    position: 'absolute',
+    left: absX * scale,
+    top: absY * scale,
+    width: node.width * scale,
+    height: node.height * scale,
+    transform: node.rotation ? `rotate(${node.rotation}deg)` : undefined,
+  });
+  const boxes = selectedIds
+    .filter((id) => id !== editingId)
+    .map((id) => findNodeAbs(nodes, id))
+    .filter((f): f is NonNullable<typeof f> => !!f && f.node.visible);
+  const hover = hoverId && hoverId !== editingId && !selectedIds.includes(hoverId)
+    ? findNodeAbs(nodes, hoverId)
+    : null;
+
+  return (
+    <div className="canvas-overlay">
+      {hover && hover.node.visible && (
+        <div className="canvas-hover-box" style={boxStyle(hover.absX, hover.absY, hover.node)} />
       )}
+      {boxes.map(({ node, absX, absY }) => (
+        <div key={node.id} className="canvas-selection-box" style={boxStyle(absX, absY, node)}>
+          {handles && selectedIds.length === 1 && (
+            <ResizeHandles
+              node={node}
+              scale={scale}
+              onResize={(patch) => onResize(node.id, patch)}
+              onCommit={onCommit}
+            />
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1157,6 +1254,7 @@ function ResizeHandles({ node, scale, onResize, onCommit }: ResizeHandlesProps) 
     borderRadius: 1,
     boxSizing: 'border-box',
     zIndex: 2,
+    pointerEvents: 'auto',
   };
 
   const handles: Array<{ dir: HandleDir; style: React.CSSProperties }> = [

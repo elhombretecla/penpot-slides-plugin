@@ -854,6 +854,26 @@ button {
   flex-shrink: 0;
 }
 
+.canvas-stage {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.canvas-selection-box,
+.canvas-hover-box {
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.canvas-selection-box { outline: 1.5px solid #6457f0; }
+.canvas-hover-box { outline: 1px solid rgba(100, 87, 240, 0.7); }
+
 .canvas-tool-text    { cursor: text; }
 .canvas-tool-rect,
 .canvas-tool-ellipse { cursor: crosshair; }
@@ -879,6 +899,7 @@ button {
 
 .canvas-text-editor {
   border: none;
+  user-select: text;
   box-shadow: none;
   font-family: inherit;
   line-height: inherit;
@@ -1993,3 +2014,103 @@ button {
 .export-placement-hint { color: var(--foreground-secondary); line-height: 1.4; margin: 0; }
 .export-pull { align-self: flex-start; }
 .export-pull:disabled { color: var(--foreground-secondary); cursor: default; }
+
+/* ─── Fonts, text styles, colors (phase 5) ─────────────────────────────────── */
+
+.font-picker { position: relative; width: 100%; }
+.font-picker-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-4);
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--spacing-8);
+  background: var(--background-tertiary);
+  border: 1px solid var(--background-quaternary);
+  border-radius: var(--spacing-4);
+  color: var(--foreground-primary);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  text-align: left;
+}
+.font-picker-btn:hover { border-color: var(--accent-primary); }
+.font-picker-btn .prop-ellipsis { flex: 1; min-width: 0; }
+.font-tag {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--background-quaternary);
+  color: var(--foreground-secondary);
+}
+.font-picker-pop {
+  position: absolute;
+  z-index: 30;
+  top: 32px;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: var(--spacing-8);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-quaternary);
+  border-radius: var(--spacing-8);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.font-picker-list { max-height: 260px; overflow-y: auto; }
+.font-picker-group {
+  padding: var(--spacing-8) var(--spacing-4) 2px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--foreground-secondary);
+}
+.font-picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-4);
+  width: 100%;
+  padding: 4px var(--spacing-4);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--foreground-primary);
+  font-size: var(--font-size-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.font-picker-item:hover { background: var(--background-tertiary); }
+.font-picker-item.active { color: var(--accent-primary); }
+.font-picker-item .prop-ellipsis { flex: 1; min-width: 0; }
+.font-picker-meta { color: var(--foreground-secondary); font-size: 10px; }
+.font-picker-empty { padding: var(--spacing-8); color: var(--foreground-secondary); font-size: var(--font-size-xs); }
+.font-picker-hint { margin: 4px 0 0; color: var(--foreground-secondary); font-size: 10px; line-height: 1.35; }
+
+.text-style-row { display: flex; gap: var(--spacing-4); align-items: center; width: 100%; }
+.text-style-row .select { flex: 1; min-width: 0; }
+.style-icon-btn, .color-add-btn {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--background-tertiary);
+  border: 1px solid var(--background-quaternary);
+  border-radius: var(--spacing-4);
+  color: var(--foreground-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.style-icon-btn:hover, .color-add-btn:hover { color: var(--accent-primary); border-color: var(--accent-primary); }
+
+.color-name-form { display: flex; gap: var(--spacing-8); align-items: center; margin: var(--spacing-4) 0; }
+.color-name-form .input { flex: 1; min-width: 0; }
+
+.prop-color { display: flex; flex-direction: column; gap: var(--spacing-4); min-width: 0; }
+.prop-swatch--token { border-radius: 50%; }
+.prop-swatches--plain .prop-swatch { width: 12px; height: 12px; }
+.token-mark { margin-right: 3px; font-size: 9px; }
+.align-btn:disabled { opacity: 0.35; cursor: not-allowed; }

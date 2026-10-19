@@ -64,6 +64,8 @@ export interface SlideNode {
   // `applyTypography` so the text stays linked to the library style.
   typographyId?: string;
   typographyLibraryId?: string;
+  // Name of the color token bound to the primary fill (text color for texts).
+  fillToken?: string;
 
   // Shape-specific (rect / ellipse / path / image background)
   // Convenience fields derived from the first fill/stroke — used by the plugin
@@ -349,6 +351,29 @@ export interface ExportSettings {
   mode?: 'new' | 'update';
 }
 
+// Penpot's font catalog (Google fonts and the team's uploaded fonts).
+export interface FontVariantInfo {
+  id: string;
+  name: string;
+  weight: string;
+  style: 'normal' | 'italic';
+}
+
+export interface FontInfo {
+  id: string;
+  name: string;
+  custom: boolean;
+  variants: FontVariantInfo[];
+}
+
+// A color design token of the file (active sets only).
+export interface ColorTokenInfo {
+  id: string;
+  name: string;
+  value: string;
+  setName: string;
+}
+
 // Where a deck was inserted before (boards tagged with its id).
 export interface DeckPlacement {
   deckId: string;
@@ -393,12 +418,21 @@ export type UIMessage =
   // Penpot's own SVG rendering of it.
   | { type: 'render-slide'; requestId: string; slide: Slide }
   | { type: 'find-deck'; deckId: string }
+  | { type: 'get-fonts' }
+  | { type: 'get-tokens' }
+  // Save a style / color in the file's own library.
+  | { type: 'create-typography'; requestId: string; name: string; style: Partial<SlideNode> }
+  | { type: 'create-color'; requestId: string; name: string; color: string; opacity: number }
   // Read the deck's boards back from Penpot (changes made on the canvas).
   | { type: 'pull-deck'; requestId: string; deckId: string; templates: Record<string, TemplateRef | null> }
   | { type: 'resize'; width: number; height: number };
 
 export type PluginMessage =
-  | { type: 'libraries'; libraries: LibraryInfo[]; fileId: string; fileName: string }
+  | { type: 'libraries'; libraries: LibraryInfo[]; fileId: string; fileName: string; localLibraryId: string }
+  | { type: 'fonts'; fonts: FontInfo[] }
+  | { type: 'tokens'; tokens: ColorTokenInfo[] }
+  | { type: 'typography-created'; requestId: string; typography: LibraryTypographyInfo | null; message?: string }
+  | { type: 'color-created'; requestId: string; color: LibraryColorInfo | null; message?: string }
   | { type: 'available-libraries'; libraries: AvailableLibrary[] }
   | { type: 'library-connected'; libraryId: string }
   | { type: 'catalog'; requestId: string; catalog: LibraryCatalog }

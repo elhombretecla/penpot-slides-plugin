@@ -17,6 +17,10 @@ import type {
   ImportedComponentPayload,
   DeckPlacement,
   PulledSlide,
+  FontInfo,
+  ColorTokenInfo,
+  LibraryColorInfo,
+  LibraryTypographyInfo,
 } from './types';
 import { cloneNodeWithNewIds, createDeck, inferRoles } from './deck';
 import { readThumbnails, writeThumbnail } from './thumbCache';
@@ -59,6 +63,8 @@ export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   createFlow: true,
   mode: 'update',
 };
+
+let fontsRequested = false;
 
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
 // All slide node operations are recursive so that grouped / nested imports
@@ -198,6 +204,26 @@ interface SlideStore {
   catalogLoading: boolean;
   requestCatalog: (libraryId: string) => void;
   receiveCatalog: (requestId: string, catalog: LibraryCatalog) => void;
+  // Catalog for its colors and text styles only (no thumbnails pass).
+  requestStyles: (libraryId: string) => void;
+
+  // The file's own library (where new text styles and colors are saved).
+  localLibraryId: string | null;
+  setLocalLibraryId: (id: string) => void;
+  addLibraryTypography: (t: LibraryTypographyInfo) => void;
+  addLibraryColor: (c: LibraryColorInfo) => void;
+
+  // Penpot's font catalog, loaded on first use.
+  fonts: FontInfo[] | null;
+  requestFonts: () => void;
+  setFonts: (fonts: FontInfo[]) => void;
+
+  // Color tokens of the file's active sets.
+  colorTokens: ColorTokenInfo[];
+  setColorTokens: (tokens: ColorTokenInfo[]) => void;
+
+  recentColors: string[];
+  pushRecentColor: (hex: string) => void;
 
   // Thumbnails are cached by component id across sessions (IndexedDB) and
   // validated by the plugin's signature. Only the latest request drives the
@@ -393,6 +419,39 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     set({ catalogRequestId: requestId, catalogLoading: !get().catalogs[libraryId] });
     penpotApi.getCatalog(requestId, libraryId);
   },
+  requestStyles: (libraryId) => penpotApi.getCatalog(uuidv4(), libraryId),
+
+  localLibraryId: null,
+  setLocalLibraryId: (localLibraryId) => set({ localLibraryId }),
+  addLibraryTypography: (t) =>
+    set((state) => {
+      const catalog = state.catalogs[t.libraryId] ?? { libraryId: t.libraryId, components: [], colors: [], typographies: [] };
+      return { catalogs: { ...state.catalogs, [t.libraryId]: { ...catalog, typographies: [...catalog.typographies, t] } } };
+    }),
+  addLibraryColor: (c) =>
+    set((state) => {
+      const catalog = state.catalogs[c.libraryId] ?? { libraryId: c.libraryId, components: [], colors: [], typographies: [] };
+      return { catalogs: { ...state.catalogs, [c.libraryId]: { ...catalog, colors: [...catalog.colors, c] } } };
+    }),
+
+  fonts: null,
+  requestFonts: () => {
+    if (fontsRequested) return;
+    fontsRequested = true;
+    penpotApi.getFonts();
+  },
+  setFonts: (fonts) => set({ fonts }),
+
+  colorTokens: [],
+  setColorTokens: (colorTokens) => set({ colorTokens }),
+
+  recentColors: [],
+  pushRecentColor: (hex) =>
+    set((state) => {
+      const color = hex.toLowerCase();
+      return { recentColors: [color, ...state.recentColors.filter((c) => c !== color)].slice(0, 8) };
+    }),
+
   receiveCatalog: (requestId, catalog) => {
     set((state) => ({
       catalogs: { ...state.catalogs, [catalog.libraryId]: catalog },

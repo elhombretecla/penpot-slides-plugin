@@ -15,6 +15,8 @@ import type {
   DeckPlacement,
   PulledSlide,
   TemplateRef,
+  FontInfo,
+  ColorTokenInfo,
 } from './types';
 import type {
   Board,
@@ -22,8 +24,10 @@ import type {
   ImageData,
   Library,
   LibraryComponent,
+  LibraryColor,
   LibraryTypography,
   Page,
+  Token,
   Shape,
   Stroke,
   Text,
@@ -80,6 +84,18 @@ penpot.ui.onMessage<UIMessage>((message) => {
       break;
     case 'render-slide':
       void handleRenderSlide(message.requestId, message.slide);
+      break;
+    case 'get-fonts':
+      handleGetFonts();
+      break;
+    case 'get-tokens':
+      handleGetTokens();
+      break;
+    case 'create-typography':
+      handleCreateTypography(message.requestId, message.name, message.style);
+      break;
+    case 'create-color':
+      handleCreateColor(message.requestId, message.name, message.color, message.opacity);
       break;
     case 'find-deck':
       send({ type: 'deck-placement', deckId: message.deckId, placement: findDeckPlacement(message.deckId) });
@@ -226,6 +242,7 @@ function handleGetLibraries() {
       libraries,
       fileId: penpot.currentFile?.id ?? '',
       fileName: penpot.currentFile?.name ?? '',
+      localLibraryId: local.id,
     });
   } catch (err) {
     sendError('Failed to load libraries: ' + stringifyErr(err));
@@ -274,35 +291,160 @@ function handleGetCatalog(requestId: string, libraryId: string) {
       ...classifyComponent(comp),
     }));
 
-    const colors: LibraryColorInfo[] = lib.colors.map((c) => ({
-      id: c.id,
-      libraryId,
-      name: c.name,
-      path: c.path ?? '',
-      color: c.color,
-      opacity: c.opacity,
-      isFlat: !!c.color && !c.gradient && !c.image,
-    }));
-
-    const typographies: LibraryTypographyInfo[] = lib.typographies.map((t) => ({
-      id: t.id,
-      libraryId,
-      name: t.name,
-      path: t.path ?? '',
-      fontId: t.fontId,
-      fontFamily: t.fontFamily,
-      fontVariantId: t.fontVariantId,
-      fontSize: parseFloat(t.fontSize) || 14,
-      fontWeight: String(t.fontWeight ?? '400'),
-      fontStyle: t.fontStyle === 'italic' ? 'italic' : 'normal',
-      lineHeight: typographyLineHeight(t),
-      letterSpacing: parseFloat(t.letterSpacing) || 0,
-      textTransform: typographyTransform(t),
-    }));
+    const colors = lib.colors.map((c) => colorInfo(c, libraryId));
+    const typographies = lib.typographies.map((t) => typographyInfo(t, libraryId));
 
     send({ type: 'catalog', requestId, catalog: { libraryId, components, colors, typographies } });
   } catch (err) {
     sendError('Failed to load components: ' + stringifyErr(err));
+  }
+}
+
+function colorInfo(c: LibraryColor, libraryId: string): LibraryColorInfo {
+  return {
+    id: c.id,
+    libraryId,
+    name: c.name,
+    path: c.path ?? '',
+    color: c.color,
+    opacity: c.opacity,
+    isFlat: !!c.color && !c.gradient && !c.image,
+  };
+}
+
+function typographyInfo(t: LibraryTypography, libraryId: string): LibraryTypographyInfo {
+  return {
+    id: t.id,
+    libraryId,
+    name: t.name,
+    path: t.path ?? '',
+    fontId: t.fontId,
+    fontFamily: t.fontFamily,
+    fontVariantId: t.fontVariantId,
+    fontSize: parseFloat(t.fontSize) || 14,
+    fontWeight: String(t.fontWeight ?? '400'),
+    fontStyle: t.fontStyle === 'italic' ? 'italic' : 'normal',
+    lineHeight: typographyLineHeight(t),
+    letterSpacing: parseFloat(t.letterSpacing) || 0,
+    textTransform: typographyTransform(t),
+  };
+}
+
+// ─── Fonts, tokens, new library styles ───────────────────────────────────────
+
+function handleGetFonts() {
+  try {
+    const fonts: FontInfo[] = penpot.fonts.all.map((f) => ({
+      id: f.fontId,
+      name: f.name,
+      custom: !String(f.fontId).startsWith('gfont-'),
+      variants: f.variants.map((v) => ({
+        id: v.fontVariantId,
+        name: v.name,
+        weight: String(v.fontWeight ?? '400'),
+        style: v.fontStyle === 'italic' ? 'italic' : 'normal',
+      })),
+    }));
+    send({ type: 'fonts', fonts });
+  } catch (err) {
+    send({ type: 'fonts', fonts: [] });
+    sendError('Could not read the fonts: ' + stringifyErr(err));
+  }
+}
+
+// Color tokens of the file's active sets (later sets win, as in Penpot).
+function activeColorTokens(): { token: Token; setName: string }[] {
+  const byName = new Map<string, { token: Token; setName: string }>();
+  try {
+    for (const set of penpot.library.local.tokens.sets) {
+      if (!set.active) continue;
+      for (const token of set.tokens) {
+        if (token.type === 'color') byName.set(token.name, { token, setName: set.name });
+      }
+    }
+  } catch {
+    // No token catalog in this Penpot version.
+  }
+  return [...byName.values()];
+}
+
+function handleGetTokens() {
+  const tokens: ColorTokenInfo[] = activeColorTokens()
+    .map(({ token, setName }) => ({
+      id: token.id,
+      name: token.name,
+      value: String((token as { resolvedValue?: unknown }).resolvedValue ?? ''),
+      setName,
+    }))
+    .filter((t) => /^#[0-9a-f]{3,8}$/i.test(t.value));
+  send({ type: 'tokens', tokens });
+}
+
+function findColorToken(name: string): Token | null {
+  return activeColorTokens().find((t) => t.token.name === name)?.token ?? null;
+}
+
+// Bind the shape's fill to a color token (values already match: this keeps
+// the link so the token can be changed later in Penpot).
+function applyFillToken(shape: Shape, node: SlideNode, warnings: string[]) {
+  if (!node.fillToken) return;
+  try {
+    if ((shape.tokens as Record<string, string> | undefined)?.fill === node.fillToken) return;
+    const token = findColorToken(node.fillToken);
+    if (!token) {
+      warnings.push(`Color token "${node.fillToken}" is not active in this file — kept its color unlinked.`);
+      return;
+    }
+    shape.applyToken(token, ['fill']);
+  } catch (err) {
+    warnings.push(`"${node.name}": could not apply token ${node.fillToken} (${stringifyErr(err)}).`);
+  }
+}
+
+// "Group / Name" in the UI becomes path + name, as Penpot's assets panel does.
+function splitAssetName(full: string): { path: string; name: string } {
+  const parts = full.split('/').map((p) => p.trim()).filter(Boolean);
+  const name = parts.pop() ?? 'Untitled';
+  return { path: parts.join(' / '), name };
+}
+
+function handleCreateTypography(requestId: string, fullName: string, style: Partial<SlideNode>) {
+  try {
+    const typography = penpot.library.local.createTypography();
+    const { path, name } = splitAssetName(fullName);
+    typography.name = name;
+    if (path) typography.path = path;
+    const font =
+      (style.fontId ? penpot.fonts.findById(style.fontId) : null) ??
+      (style.fontFamily ? penpot.fonts.findByName(style.fontFamily) : null);
+    if (font) {
+      const variant =
+        font.variants.find((v) => v.fontVariantId === style.fontVariantId) ??
+        font.variants.find((v) => v.fontWeight === (style.fontWeight ?? '400') && v.fontStyle === (style.fontStyle ?? 'normal')) ??
+        undefined;
+      typography.setFont(font, variant);
+    }
+    if (style.fontSize != null) typography.fontSize = String(style.fontSize);
+    if (style.lineHeight != null) typography.lineHeight = String(style.lineHeight);
+    if (style.letterSpacing != null) typography.letterSpacing = String(style.letterSpacing);
+    typography.textTransform = style.textTransform ?? null;
+    send({ type: 'typography-created', requestId, typography: typographyInfo(typography, penpot.library.local.id) });
+  } catch (err) {
+    send({ type: 'typography-created', requestId, typography: null, message: stringifyErr(err) });
+  }
+}
+
+function handleCreateColor(requestId: string, fullName: string, color: string, opacity: number) {
+  try {
+    const libraryColor = penpot.library.local.createColor();
+    const { path, name } = splitAssetName(fullName);
+    libraryColor.name = name;
+    if (path) libraryColor.path = path;
+    libraryColor.color = color.toUpperCase();
+    libraryColor.opacity = opacity;
+    send({ type: 'color-created', requestId, color: colorInfo(libraryColor, penpot.library.local.id) });
+  } catch (err) {
+    send({ type: 'color-created', requestId, color: null, message: stringifyErr(err) });
   }
 }
 
@@ -861,6 +1003,7 @@ async function importShape(
     rotation,
     sourceType: shape.type,
     slotId: slotIdOf(shape),
+    fillToken: fillTokenOf(shape),
   };
 
   const fills = 'fills' in shape && Array.isArray(shape.fills) ? shape.fills : [];
@@ -1029,6 +1172,14 @@ async function importShape(
   };
 }
 
+function fillTokenOf(shape: Shape): string | undefined {
+  try {
+    return (shape.tokens as Record<string, string> | undefined)?.fill || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Text properties may be 'mixed' when the text has several style runs. In
 // that case the first character's style is used instead of hard-coded
 // defaults, so at least the dominant opening style survives.
@@ -1106,7 +1257,9 @@ function matchTypography(style: Partial<SlideNode>, typographies: LibraryTypogra
         near(style.fontSize, parseFloat(t.fontSize) || 0) &&
         String(t.fontWeight) === style.fontWeight &&
         (t.fontStyle ?? 'normal') === (style.fontStyle ?? 'normal') &&
-        near(style.lineHeight, typographyLineHeight(t)) &&
+        // The API often reports no line height for a typography (and never
+        // applies it): only compare when it does.
+        (t.lineHeight == null || near(style.lineHeight, typographyLineHeight(t))) &&
         near(style.letterSpacing, parseFloat(t.letterSpacing) || 0) &&
         typographyTransform(t) === style.textTransform
     ) ?? null
@@ -1953,6 +2106,7 @@ async function applyNodeOverrides(shape: Shape, node: SlideNode, absX: number, a
     } else if (node.fontColor && fillsKey(text.fills) !== fillsKey([{ fillColor: node.fontColor, fillOpacity: 1 }])) {
       text.fills = [{ fillColor: node.fontColor, fillOpacity: 1 }];
     }
+    applyFillToken(text, node, warnings);
     return;
   }
 
@@ -1973,6 +2127,7 @@ async function applyNodeOverrides(shape: Shape, node: SlideNode, absX: number, a
   if (shape.type === 'rectangle' && node.borderRadius !== undefined && differs(shape.borderRadius, node.borderRadius, 0.01)) {
     shape.borderRadius = node.borderRadius;
   }
+  applyFillToken(shape, node, warnings);
 }
 
 function textStyleDiffers(current: Partial<SlideNode>, node: SlideNode): boolean {
@@ -2040,6 +2195,7 @@ async function createShapeForNode(
         inner.fills = node.fills && node.fills.length > 0 ? (clonePlain(node.fills) as Fill[]) : [];
         if (node.imageReplaced) inner.fills = await withReplacedImage(inner.fills as Fill[], node, warnings);
         if (node.strokes?.length) inner.strokes = clonePlain(node.strokes) as Stroke[];
+        applyFillToken(inner, node, warnings);
         await populateNodes(inner, node.children ?? [], absX, absY, warnings);
         return inner;
       }
@@ -2059,6 +2215,7 @@ async function createShapeForNode(
       parent.appendChild(text);
       applyTextStyle(text, node, warnings);
       applyFillsAndStrokes(text, node, { fill: node.fontColor ?? '#000000' });
+      applyFillToken(text, node, warnings);
       place(text, node, absX, absY);
       // resize() forces growType 'fixed'; restore the template's behaviour.
       if (node.growType && node.growType !== 'fixed') text.growType = node.growType;
@@ -2072,6 +2229,7 @@ async function createShapeForNode(
       applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
       if (node.imageReplaced) rect.fills = await withReplacedImage(rect.fills as Fill[], node, warnings);
       if (node.borderRadius) rect.borderRadius = node.borderRadius;
+      applyFillToken(rect, node, warnings);
       place(rect, node, absX, absY);
       return rect;
     }
@@ -2082,6 +2240,7 @@ async function createShapeForNode(
       parent.appendChild(ellipse);
       applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
       if (node.imageReplaced) ellipse.fills = await withReplacedImage(ellipse.fills as Fill[], node, warnings);
+      applyFillToken(ellipse, node, warnings);
       place(ellipse, node, absX, absY);
       return ellipse;
     }
@@ -2303,6 +2462,11 @@ function applyTextStyle(text: Text, node: SlideNode, warnings: string[]) {
         .find((t) => t.id === node.typographyId);
     if (typography) {
       text.applyTypography(typography);
+      // applyTypography always leaves line height at 1.2 (Penpot API bug):
+      // write the slide's value; the typography link survives it.
+      if (node.lineHeight != null && differs(parseFloat(text.lineHeight) || 1.2, node.lineHeight, 0.001)) {
+        text.lineHeight = String(node.lineHeight);
+      }
       if (node.textAlign) text.align = node.textAlign;
       if (node.verticalAlign) text.verticalAlign = node.verticalAlign;
       if (node.textDecoration) text.textDecoration = node.textDecoration;

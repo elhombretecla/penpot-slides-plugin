@@ -390,12 +390,14 @@ export function ensureFontLoaded(family: string | undefined | null): void {
 // Return a CSS `font-family` value with safe fallbacks, and request the
 // stylesheet for the primary family as a side-effect so the browser can use
 // it as soon as it arrives. Generic families are passed through unchanged.
-export function fontFamilyCss(family: string | undefined | null): string {
+export function fontFamilyCss(family: string | undefined | null, fontId?: string): string {
   if (!family) return 'sans-serif';
   const clean = family.trim().replace(/^["']|["']$/g, '');
   if (!clean) return 'sans-serif';
   if (GENERIC_FAMILIES.has(clean.toLowerCase())) return clean;
-  ensureFontLoaded(clean);
+  // Team-uploaded fonts are not on Google Fonts (and their files need a
+  // Penpot session): only the Penpot render can show them.
+  if (!fontId?.startsWith('custom-')) ensureFontLoaded(clean);
   return `"${clean}", sans-serif`;
 }
 
@@ -622,7 +624,7 @@ export function textNodeCss(node: SlideNode, scale: number): import('react').CSS
     fontSize: (node.fontSize ?? 14) * scale,
     fontWeight: node.fontWeight ?? '400',
     fontStyle: node.fontStyle ?? 'normal',
-    fontFamily: fontFamilyCss(node.fontFamily),
+    fontFamily: fontFamilyCss(node.fontFamily, node.fontId),
     textAlign: node.textAlign ?? 'left',
     textTransform: node.textTransform ?? 'none',
     textDecoration: node.textDecoration ?? 'none',

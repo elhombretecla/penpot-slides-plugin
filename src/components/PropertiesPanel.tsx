@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSlideStore } from '../store';
-import type { LibraryColorInfo, LibraryTypographyInfo, Slide, SlideNode } from '../types';
+import type { ColorTokenInfo, LibraryColorInfo, LibraryTypographyInfo, Slide, SlideNode } from '../types';
 import {
   findNodeById,
   normalizeHex,
@@ -12,6 +12,10 @@ import {
 } from '../utils';
 import { isImageNode } from '../deck';
 import { applyTemplates } from '../templateActions';
+import { penpotApi } from '../api';
+import { createLibraryColor, createTextStyle } from '../libraryAssets';
+import ColorField from './ColorField';
+import FontPicker, { closestVariant, useFonts } from './FontPicker';
 
 interface Props { slide: Slide | null; }
 
@@ -31,16 +35,17 @@ const ROLE_LABEL: Record<string, string> = {
 // then the slide's own template library.
 function useLibraryStyles(slide: Slide | null) {
   const deckLibraryId = useSlideStore((s) => s.deck?.libraryId);
+  const localLibraryId = useSlideStore((s) => s.localLibraryId);
   const catalogs = useSlideStore((s) => s.catalogs);
-  const requestCatalog = useSlideStore((s) => s.requestCatalog);
+  const requestStyles = useSlideStore((s) => s.requestStyles);
+  // The file's own library last: that is where new styles are saved.
   const ids = useMemo(
-    () => [...new Set([deckLibraryId, slide?.template?.libraryId].filter((x): x is string => !!x))],
-    [deckLibraryId, slide?.template?.libraryId]
+    () => [...new Set([deckLibraryId, slide?.template?.libraryId, localLibraryId].filter((x): x is string => !!x))],
+    [deckLibraryId, slide?.template?.libraryId, localLibraryId]
   );
   useEffect(() => {
-    const missing = ids.find((id) => !useSlideStore.getState().catalogs[id]);
-    if (missing) requestCatalog(missing);
-  }, [ids, requestCatalog]);
+    for (const id of ids) if (!useSlideStore.getState().catalogs[id]) requestStyles(id);
+  }, [ids, requestStyles]);
   return useMemo(() => {
     const colors: LibraryColorInfo[] = [];
     const typographies: LibraryTypographyInfo[] = [];
@@ -56,6 +61,60 @@ function colorFill(c: LibraryColorInfo) {
   return { fillColor: c.color, fillOpacity: c.opacity ?? 1, fillColorRefId: c.id, fillColorRefFile: c.libraryId };
 }
 
+// Colors used across the deck (most used first), for consistency.
+function useDeckColors(): string[] {
+  const slides = useSlideStore((s) => s.slides);
+  return useMemo(() => {
+    const count = new Map<string, number>();
+    const add = (hex: string | null | undefined) => {
+      if (hex) count.set(hex, (count.get(hex) ?? 0) + 1);
+    };
+    const visit = (nodes: SlideNode[]) => {
+      for (const n of nodes) {
+        if (n.type === 'text') add(normalizeHex(primaryFillHex(n.fills, n.fontColor ?? '')));
+        else if (n.fills?.length || n.fill) add(normalizeHex(primaryFillHex(n.fills, n.fill ?? '')));
+        if (n.children) visit(n.children);
+      }
+    };
+    for (const s of slides) {
+      add(normalizeHex(primaryFillHex(s.backgroundFills, s.background)));
+      visit(s.nodes);
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
+  }, [slides]);
+}
+
+// Everything a color field offers besides the library colors.
+interface ColorContext {
+  tokens: ColorTokenInfo[];
+  deckColors: string[];
+  recent: string[];
+  remember: (hex: string) => void;
+  saveColor: (name: string, hex: string) => Promise<LibraryColorInfo | null>;
+}
+
+function useColorContext(): ColorContext {
+  const tokens = useSlideStore((s) => s.colorTokens);
+  const recent = useSlideStore((s) => s.recentColors);
+  const remember = useSlideStore((s) => s.pushRecentColor);
+  const deckColors = useDeckColors();
+  useEffect(() => penpotApi.getTokens(), []);
+  return {
+    tokens,
+    deckColors,
+    recent,
+    remember,
+    saveColor: async (name, hex) => {
+      try {
+        return await createLibraryColor(name, hex);
+      } catch (err) {
+        useSlideStore.getState().pushNotice('error', `Could not save the color: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    },
+  };
+}
+
 export default function PropertiesPanel({ slide }: Props) {
   const selectedNodeIds = useSlideStore((s) => s.selectedNodeIds);
   const updateNode = useSlideStore((s) => s.updateNode);
@@ -63,6 +122,7 @@ export default function PropertiesPanel({ slide }: Props) {
   const commitHistory = useSlideStore((s) => s.commitHistory);
   const commitHistoryCoalesced = useSlideStore((s) => s.commitHistoryCoalesced);
   const styles = useLibraryStyles(slide);
+  const colorCtx = useColorContext();
 
   if (!slide) {
     return (
@@ -91,12 +151,13 @@ export default function PropertiesPanel({ slide }: Props) {
       {selectedNodeIds.length > 1 ? (
         <p className="panel-empty-msg">{selectedNodeIds.length} elements selected</p>
       ) : !selectedNode ? (
-        <SlideProperties slide={slide} colors={styles.colors} />
+        <SlideProperties slide={slide} colors={styles.colors} colorCtx={colorCtx} />
       ) : (
         <NodeProperties
           node={selectedNode}
           colors={styles.colors}
           typographies={styles.typographies}
+          colorCtx={colorCtx}
           onUpdate={update}
           onDelete={() => {
             commitHistory();
@@ -110,7 +171,7 @@ export default function PropertiesPanel({ slide }: Props) {
 
 // ─── Slide Properties ─────────────────────────────────────────────────────────
 
-function SlideProperties({ slide, colors }: { slide: Slide; colors: LibraryColorInfo[] }) {
+function SlideProperties({ slide, colors, colorCtx }: { slide: Slide; colors: LibraryColorInfo[]; colorCtx: ColorContext }) {
   const updateSlide = useSlideStore((s) => s.updateSlide);
   const commitHistoryCoalesced = useSlideStore((s) => s.commitHistoryCoalesced);
   const openPicker = useSlideStore((s) => s.openPicker);
@@ -147,12 +208,22 @@ function SlideProperties({ slide, colors }: { slide: Slide; colors: LibraryColor
           <span className="prop-value-text body-xs">{slide.width} × {slide.height}</span>
         </PropRow>
         <PropRow label="Background">
-          <ColorInput
+          <ColorField
             value={primaryFillHex(slide.backgroundFills, slide.background)}
             linkedId={primaryFillRef(slide.backgroundFills)}
             swatches={colors}
-            onChange={(v) => setBackground(v)}
+            deckColors={colorCtx.deckColors}
+            recent={colorCtx.recent}
+            onChange={(v) => {
+              colorCtx.remember(v);
+              setBackground(v);
+            }}
             onPickSwatch={(c) => setBackground(c.color ?? slide.background, colorFill(c))}
+            onAddToLibrary={async (name) => {
+              const hex = primaryFillHex(slide.backgroundFills, slide.background);
+              const c = await colorCtx.saveColor(name, hex);
+              if (c) setBackground(c.color ?? hex, colorFill(c));
+            }}
           />
         </PropRow>
       </div>
@@ -209,12 +280,14 @@ function NodeProperties({
   node,
   colors,
   typographies,
+  colorCtx,
   onUpdate,
   onDelete,
 }: {
   node: SlideNode;
   colors: LibraryColorInfo[];
   typographies: LibraryTypographyInfo[];
+  colorCtx: ColorContext;
   onUpdate: (u: Partial<SlideNode>) => void;
   onDelete: () => void;
 }) {
@@ -303,12 +376,25 @@ function NodeProperties({
 
         {isShape && (
           <PropRow label="Fill">
-            <ColorInput
+            <ColorField
               value={primaryFillHex(node.fills, node.fill ?? '#ffffff')}
               linkedId={primaryFillRef(node.fills)}
               swatches={colors}
-              onChange={(v) => onUpdate({ fill: v, fills: withPrimaryFillColor(node.fills, v) })}
-              onPickSwatch={(c) => onUpdate({ fill: c.color, fills: withPrimaryFill(node.fills, colorFill(c)) })}
+              tokens={colorCtx.tokens}
+              linkedToken={node.fillToken}
+              deckColors={colorCtx.deckColors}
+              recent={colorCtx.recent}
+              onChange={(v) => {
+                colorCtx.remember(v);
+                onUpdate({ fill: v, fills: withPrimaryFillColor(node.fills, v), fillToken: undefined });
+              }}
+              onPickSwatch={(c) => onUpdate({ fill: c.color, fills: withPrimaryFill(node.fills, colorFill(c)), fillToken: undefined })}
+              onPickToken={(t) => onUpdate({ fill: t.value, fills: withPrimaryFillColor(node.fills, t.value), fillToken: t.name })}
+              onAddToLibrary={async (name) => {
+                const hex = primaryFillHex(node.fills, node.fill ?? '#ffffff');
+                const c = await colorCtx.saveColor(name, hex);
+                if (c) onUpdate({ fill: c.color, fills: withPrimaryFill(node.fills, colorFill(c)), fillToken: undefined });
+              }}
             />
           </PropRow>
         )}
@@ -331,29 +417,21 @@ function NodeProperties({
 
       {node.type === 'text' && (
         <Accordion title="TYPOGRAPHY" open={showTypo} onToggle={() => setShowTypo((v) => !v)}>
-          {typographies.length > 0 && (
-            <PropRow label="Style">
-              <select
-                className="select"
-                style={{ blockSize: '28px', fontSize: 'var(--font-size-xs)' }}
-                value={node.typographyId ?? ''}
-                onChange={(e) => {
-                  const t = typographies.find((x) => x.id === e.target.value);
-                  if (t) applyTypography(t);
-                }}
-              >
-                <option value="" disabled>{node.typographyId ? 'Unknown style' : 'Custom'}</option>
-                {typographies.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.path ? `${t.path} / ` : ''}{t.name} — {t.fontSize}px
-                  </option>
-                ))}
-              </select>
-            </PropRow>
-          )}
+          <TextStyleRow node={node} typographies={typographies} onApply={applyTypography} onUpdate={onUpdate} />
 
           <PropRow label="Font">
-            <span className="prop-value-text body-xs prop-ellipsis">{node.fontFamily ?? 'Default'}</span>
+            <FontPicker
+              node={node}
+              onPick={(font, variant) =>
+                onUpdate({
+                  fontId: font.id,
+                  fontFamily: font.name,
+                  fontVariantId: variant?.id,
+                  fontWeight: variant?.weight ?? node.fontWeight,
+                  fontStyle: variant?.style ?? node.fontStyle,
+                })
+              }
+            />
           </PropRow>
 
           <div className="prop-row-2col">
@@ -363,16 +441,7 @@ function NodeProperties({
             </div>
             <div className="prop-field">
               <label className="prop-label-sm">Weight</label>
-              <select
-                className="select"
-                style={{ blockSize: '28px', fontSize: 'var(--font-size-xs)' }}
-                value={node.fontWeight ?? '400'}
-                onChange={(e) => onUpdate({ fontWeight: e.target.value, fontVariantId: undefined })}
-              >
-                {['100', '200', '300', '400', '500', '600', '700', '800', '900'].map((w) => (
-                  <option key={w} value={w}>{WEIGHT_LABEL[w]}</option>
-                ))}
-              </select>
+              <WeightSelect node={node} onUpdate={onUpdate} />
             </div>
           </div>
 
@@ -388,12 +457,25 @@ function NodeProperties({
           </div>
 
           <PropRow label="Color">
-            <ColorInput
+            <ColorField
               value={primaryFillHex(node.fills, node.fontColor ?? '#ffffff')}
               linkedId={primaryFillRef(node.fills)}
               swatches={colors}
-              onChange={(v) => onUpdate({ fontColor: v, fills: withPrimaryFillColor(node.fills, v) })}
-              onPickSwatch={(c) => onUpdate({ fontColor: c.color, fills: withPrimaryFill(node.fills, colorFill(c)) })}
+              tokens={colorCtx.tokens}
+              linkedToken={node.fillToken}
+              deckColors={colorCtx.deckColors}
+              recent={colorCtx.recent}
+              onChange={(v) => {
+                colorCtx.remember(v);
+                onUpdate({ fontColor: v, fills: withPrimaryFillColor(node.fills, v), fillToken: undefined });
+              }}
+              onPickSwatch={(c) => onUpdate({ fontColor: c.color, fills: withPrimaryFill(node.fills, colorFill(c)), fillToken: undefined })}
+              onPickToken={(t) => onUpdate({ fontColor: t.value, fills: withPrimaryFillColor(node.fills, t.value), fillToken: t.name })}
+              onAddToLibrary={async (name) => {
+                const hex = primaryFillHex(node.fills, node.fontColor ?? '#ffffff');
+                const c = await colorCtx.saveColor(name, hex);
+                if (c) onUpdate({ fontColor: c.color, fills: withPrimaryFill(node.fills, colorFill(c)), fillToken: undefined });
+              }}
             />
           </PropRow>
 
@@ -411,13 +493,7 @@ function NodeProperties({
 
           <PropRow label="Style">
             <div className="align-buttons">
-              <button
-                className={`align-btn ${node.fontStyle === 'italic' ? 'active' : ''}`}
-                title="Italic"
-                onClick={() => onUpdate({ fontStyle: node.fontStyle === 'italic' ? 'normal' : 'italic', fontVariantId: undefined })}
-              >
-                <em>I</em>
-              </button>
+              <ItalicButton node={node} onUpdate={onUpdate} />
               <button
                 className={`align-btn ${node.textDecoration === 'underline' ? 'active' : ''}`}
                 title="Underline"
@@ -468,6 +544,154 @@ function NodeProperties({
         )}
       </Accordion>
     </div>
+  );
+}
+
+// Text style: library styles of the deck, a way out (detach) and a way in
+// (save the current settings as a style of the file's library).
+function TextStyleRow({
+  node,
+  typographies,
+  onApply,
+  onUpdate,
+}: {
+  node: SlideNode;
+  typographies: LibraryTypographyInfo[];
+  onApply: (t: LibraryTypographyInfo) => void;
+  onUpdate: (u: Partial<SlideNode>) => void;
+}) {
+  const [naming, setNaming] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const linked = typographies.find((t) => t.id === node.typographyId);
+
+  async function save() {
+    const name = (naming ?? '').trim();
+    if (!name) return;
+    setSaving(true);
+    try {
+      const t = await createTextStyle(name, node);
+      onUpdate({ typographyId: t.id, typographyLibraryId: t.libraryId });
+      setNaming(null);
+    } catch (err) {
+      useSlideStore.getState().pushNotice('error', `Could not save the text style: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <PropRow label="Style">
+        <div className="text-style-row">
+          <select
+            className="select"
+            style={{ blockSize: '28px', fontSize: 'var(--font-size-xs)' }}
+            value={node.typographyId ?? ''}
+            onChange={(e) => {
+              const t = typographies.find((x) => x.id === e.target.value);
+              if (t) onApply(t);
+            }}
+          >
+            <option value="" disabled>{node.typographyId && !linked ? 'Unknown style' : 'Custom'}</option>
+            {typographies.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.path ? `${t.path} / ` : ''}{t.name} — {t.fontSize}px
+              </option>
+            ))}
+          </select>
+          {node.typographyId ? (
+            <button
+              className="style-icon-btn"
+              title="Detach from the text style (keep the current look)"
+              onClick={() => onUpdate({ typographyId: undefined, typographyLibraryId: undefined })}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 17H7A5 5 0 0 1 7 7h2" /><path d="M15 7h2a5 5 0 0 1 4 8" /><line x1="2" y1="2" x2="22" y2="22" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              className="style-icon-btn"
+              title="Save these settings as a text style in this file's library"
+              onClick={() => setNaming(`${node.fontFamily ?? 'Text'} ${node.fontSize ?? ''}`.trim())}
+            >
+              +
+            </button>
+          )}
+        </div>
+      </PropRow>
+      {naming !== null && (
+        <form
+          className="color-name-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+        >
+          <input
+            autoFocus
+            className="input input-sm"
+            placeholder="Style name (Group / Name)"
+            value={naming}
+            onChange={(e) => setNaming(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setNaming(null);
+            }}
+          />
+          <button type="submit" className="btn-link" disabled={saving || !naming.trim()}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </form>
+      )}
+    </>
+  );
+}
+
+// Weights the font really has (in the current style); a free list when the
+// font is unknown to Penpot's catalog.
+function WeightSelect({ node, onUpdate }: { node: SlideNode; onUpdate: (u: Partial<SlideNode>) => void }) {
+  const fonts = useFonts();
+  const font = fonts?.find((f) => f.id === node.fontId);
+  const style = node.fontStyle ?? 'normal';
+  const variants = font?.variants.filter((v) => v.style === style) ?? [];
+  const options = variants.length > 0
+    ? variants.map((v) => ({ value: v.weight, label: v.name.replace(/\s*italic$/i, '') || WEIGHT_LABEL[v.weight], id: v.id }))
+    : Object.keys(WEIGHT_LABEL).map((w) => ({ value: w, label: WEIGHT_LABEL[w], id: undefined as string | undefined }));
+  const value = node.fontWeight ?? '400';
+  return (
+    <select
+      className="select"
+      style={{ blockSize: '28px', fontSize: 'var(--font-size-xs)' }}
+      value={options.some((o) => o.value === value) ? value : ''}
+      onChange={(e) => {
+        const opt = options.find((o) => o.value === e.target.value);
+        onUpdate({ fontWeight: e.target.value, fontVariantId: opt?.id });
+      }}
+    >
+      {!options.some((o) => o.value === value) && <option value="" disabled>{WEIGHT_LABEL[value] ?? value}</option>}
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function ItalicButton({ node, onUpdate }: { node: SlideNode; onUpdate: (u: Partial<SlideNode>) => void }) {
+  const fonts = useFonts();
+  const font = fonts?.find((f) => f.id === node.fontId);
+  const italic = node.fontStyle === 'italic';
+  const target = italic ? 'normal' : 'italic';
+  const variant = font ? closestVariant(font, node.fontWeight, target) : undefined;
+  const available = !font || variant?.style === target;
+  return (
+    <button
+      className={`align-btn ${italic ? 'active' : ''}`}
+      title={available ? 'Italic' : 'This font has no italic'}
+      disabled={!available}
+      onClick={() => onUpdate({ fontStyle: target, fontVariantId: variant?.id, fontWeight: variant?.weight ?? node.fontWeight })}
+    >
+      <em>I</em>
+    </button>
   );
 }
 
@@ -530,77 +754,6 @@ function NumberInput({
         onBlur={() => setDraft(String(value))}
       />
       {suffix && <span className="prop-number-suffix">{suffix}</span>}
-    </div>
-  );
-}
-
-// The hex field keeps a local draft so half-typed values ("#a1") are never
-// written to the slide; only complete #rgb / #rrggbb values are committed.
-// Library colors are offered as swatches and keep their library link.
-function ColorInput({
-  value,
-  onChange,
-  swatches = [],
-  linkedId,
-  onPickSwatch,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  swatches?: LibraryColorInfo[];
-  linkedId?: string;
-  onPickSwatch?: (c: LibraryColorInfo) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const linked = swatches.find((c) => c.id === linkedId);
-
-  return (
-    <div className="prop-color">
-      <div className="prop-color-wrap">
-        <input
-          className="prop-color-swatch"
-          type="color"
-          value={normalizeHex(value) ?? '#000000'}
-          onChange={(e) => onChange(e.target.value)}
-        />
-        {linked ? (
-          <span className="prop-color-linked body-xs" title="Linked to a library color">{linked.name}</span>
-        ) : (
-          <input
-            className="input"
-            type="text"
-            value={draft}
-            maxLength={7}
-            style={{ width: '80px', fontFamily: 'monospace', fontSize: 'var(--font-size-xs)', paddingBlock: 'var(--spacing-4)' }}
-            onChange={(e) => {
-              const raw = e.target.value.startsWith('#') ? e.target.value : `#${e.target.value}`;
-              if (!/^#[0-9a-fA-F]{0,6}$/.test(raw)) return;
-              setDraft(raw);
-              const hex = normalizeHex(raw);
-              if (hex && raw.length === 7) onChange(hex);
-            }}
-            onBlur={() => {
-              const hex = normalizeHex(draft);
-              if (hex) onChange(hex);
-              else setDraft(value);
-            }}
-            onKeyDown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); }}
-          />
-        )}
-      </div>
-      {swatches.length > 0 && onPickSwatch && (
-        <div className="prop-swatches">
-          {swatches.map((c) => (
-            <button
-              key={c.id}
-              className={`prop-swatch ${c.id === linkedId ? 'active' : ''}`}
-              style={{ background: c.color, opacity: c.opacity ?? 1 }}
-              title={`${c.path ? `${c.path} / ` : ''}${c.name} ${c.color ?? ''}`}
-              onClick={() => onPickSwatch(c)}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

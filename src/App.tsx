@@ -6,6 +6,7 @@ import { parseDeck } from './deck';
 import { onDeckSaved, startAutosave } from './autosave';
 import { receiveSlideRender, startRenderer } from './render/renderer';
 import { isSvgMarkup, prepareSvg } from './render/svg';
+import { resolveCreated } from './libraryAssets';
 import { finishTemplateJob } from './templateActions';
 import { penpotApi } from './api';
 import HomeScreen from './screens/HomeScreen';
@@ -56,6 +57,25 @@ export default function App() {
       switch (data.type) {
         case 'libraries':
           store.setLibraries(data.libraries, data.fileName);
+          store.setLocalLibraryId(data.localLibraryId);
+          break;
+
+        case 'fonts':
+          store.setFonts(data.fonts);
+          break;
+
+        case 'tokens':
+          store.setColorTokens(data.tokens);
+          break;
+
+        case 'typography-created':
+          resolveCreated(data.requestId, data.typography, data.message);
+          if (data.typography) store.addLibraryTypography(data.typography);
+          break;
+
+        case 'color-created':
+          resolveCreated(data.requestId, data.color, data.message);
+          if (data.color) store.addLibraryColor(data.color);
           break;
 
         case 'available-libraries':

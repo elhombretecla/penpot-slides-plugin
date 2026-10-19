@@ -29,6 +29,12 @@ export const penpotApi = {
   deleteDeck: (deckId: string) => send({ type: 'delete-deck', deckId }),
   renderSlide: (requestId: string, slide: Slide) => send({ type: 'render-slide', requestId, slide }),
   findDeck: (deckId: string) => send({ type: 'find-deck', deckId }),
+  getFonts: () => send({ type: 'get-fonts' }),
+  getTokens: () => send({ type: 'get-tokens' }),
+  createTypography: (requestId: string, name: string, style: Partial<Slide['nodes'][number]>) =>
+    send({ type: 'create-typography', requestId, name, style }),
+  createColor: (requestId: string, name: string, color: string, opacity: number) =>
+    send({ type: 'create-color', requestId, name, color, opacity }),
   pullDeck: (requestId: string, deckId: string, templates: Record<string, TemplateRef | null>) =>
     send({ type: 'pull-deck', requestId, deckId, templates }),
   resize: (width: number, height: number) => send({ type: 'resize', width, height }),
