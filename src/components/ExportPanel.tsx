@@ -11,11 +11,13 @@ export default function ExportPanel() {
   const setInsertResult = useSlideStore((s) => s.setInsertResult);
   const setShowExportPanel = useSlideStore((s) => s.setShowExportPanel);
 
+  const deck = useSlideStore((s) => s.deck);
+
   function handleInsert() {
     if (slides.length === 0) return;
     setIsInserting(true);
     setInsertResult(null);
-    penpotApi.insertIntoCanvas(slides, exportSettings);
+    penpotApi.insertIntoCanvas(deck?.id ?? '', deck?.name ?? 'Slides', slides, exportSettings);
   }
 
   return (
@@ -27,10 +29,13 @@ export default function ExportPanel() {
         </span>
         <span className="export-info-badge">Total: {slides.length} Slides</span>
         <p className="export-info-desc">
-          Slides will be arranged horizontally on the canvas.
+          Each slide becomes a board, arranged left to right
+          {exportSettings.createNewPage ? ` on a new page “${deck?.name ?? 'Slides'}”` : ' on the current page'}.
           {exportSettings.wrapInDeck
             ? ' They go inside one "Slides deck" board.'
-            : " Each slide is a top-level board, so Penpot's View mode can present them."}
+            : exportSettings.createFlow
+              ? " A flow is created so you can present them with Penpot's View mode."
+              : ' Each slide is a top-level board.'}
         </p>
       </div>
 
@@ -57,7 +62,7 @@ export default function ExportPanel() {
 
         <div className="export-divider" />
 
-        {/* Group into Section */}
+        {/* Deck wrapper */}
         <div className="export-setting-row">
           <div className="export-setting-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -73,6 +78,27 @@ export default function ExportPanel() {
             onClick={() => setExportSettings({ wrapInDeck: !exportSettings.wrapInDeck })}
             role="switch"
             aria-checked={exportSettings.wrapInDeck}
+          >
+            <span className="toggle-thumb" />
+          </button>
+        </div>
+
+        <div className="export-divider" />
+
+        <div className="export-setting-row">
+          <div className="export-setting-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="6 4 20 12 6 20 6 4"/>
+            </svg>
+            <span className="body-s">Create presentation flow</span>
+          </div>
+          <button
+            className={`toggle ${exportSettings.createFlow && !exportSettings.wrapInDeck ? 'on' : 'off'}`}
+            onClick={() => setExportSettings({ createFlow: !exportSettings.createFlow })}
+            disabled={exportSettings.wrapInDeck}
+            title={exportSettings.wrapInDeck ? 'Flows need top-level boards: turn off the deck board' : undefined}
+            role="switch"
+            aria-checked={exportSettings.createFlow && !exportSettings.wrapInDeck}
           >
             <span className="toggle-thumb" />
           </button>

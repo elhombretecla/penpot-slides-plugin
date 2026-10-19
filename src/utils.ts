@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { Slide, SlideNode, PresetLayout, SlideSizePreset } from './types';
+import type { ComponentInfo, Slide, SlideNode, PresetLayout, SlideSizePreset } from './types';
 import { SLIDE_SIZE_PRESETS } from './types';
 
 // ─── Slide Creation Helpers ───────────────────────────────────────────────────
@@ -50,21 +50,21 @@ export function createSlideWithLayout(
       nodes.push(makeBodyNode(
         'Body Text',
         'Add your content here. Click to edit this text.',
-        w * 0.1, h * 0.4, w * 0.8, h * 0.45
+        w * 0.1, h * 0.4, w * 0.8, h * 0.45, w
       ));
       break;
 
     case 'two-columns': {
       const colW = w * 0.42;
       nodes.push(makeTitleNode('Slide Title', w * 0.05, h * 0.06, w * 0.9, h * 0.15, w));
-      nodes.push(makeBodyNode('Left Column', 'Left column content', w * 0.05, h * 0.28, colW, h * 0.58));
-      nodes.push(makeBodyNode('Right Column', 'Right column content', w * 0.53, h * 0.28, colW, h * 0.58));
+      nodes.push(makeBodyNode('Left Column', 'Left column content', w * 0.05, h * 0.28, colW, h * 0.58, w));
+      nodes.push(makeBodyNode('Right Column', 'Right column content', w * 0.53, h * 0.28, colW, h * 0.58, w));
       break;
     }
 
     case 'image-caption': {
       nodes.push(makeRectNode('Image Placeholder', w * 0.05, h * 0.08, w * 0.9, h * 0.6, '#2d2d4e'));
-      nodes.push(makeBodyNode('Caption', 'Image caption or description', w * 0.05, h * 0.72, w * 0.9, h * 0.2));
+      nodes.push(makeBodyNode('Caption', 'Image caption or description', w * 0.05, h * 0.72, w * 0.9, h * 0.2, w));
       break;
     }
 
@@ -99,8 +99,17 @@ export function makeTitleNode(
     fontWeight: '700',
     fontColor: '#ffffff',
     textAlign: 'center',
-    fontFamily: 'sans-serif',
+    fontFamily: 'Work Sans',
+    fontId: 'gfont-work-sans',
+    lineHeight: 1.1,
+    role: 'title',
   };
+}
+
+// Body copy that reads well on a projected slide: ~2.2% of the slide width
+// (42 px on 1920).
+function bodySize(slideWidth: number) {
+  return Math.max(16, Math.round(slideWidth * 0.022));
 }
 
 export function makeBodyNode(
@@ -109,7 +118,8 @@ export function makeBodyNode(
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  slideWidth = 1920
 ): SlideNode {
   return {
     id: uuidv4(),
@@ -120,11 +130,14 @@ export function makeBodyNode(
     opacity: 1,
     rotation: 0,
     text,
-    fontSize: 18,
+    fontSize: bodySize(slideWidth),
     fontWeight: '400',
     fontColor: '#cccccc',
     textAlign: 'left',
-    fontFamily: 'sans-serif',
+    fontFamily: 'Work Sans',
+    fontId: 'gfont-work-sans',
+    lineHeight: 1.3,
+    role: 'body',
   };
 }
 
@@ -175,7 +188,8 @@ export function makeTextNode(
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  slideWidth = 1920
 ): SlideNode {
   return {
     id: uuidv4(),
@@ -186,38 +200,64 @@ export function makeTextNode(
     opacity: 1,
     rotation: 0,
     text: 'Add text here',
-    fontSize: 20,
+    fontSize: bodySize(slideWidth),
     fontWeight: '400',
     fontColor: '#ffffff',
     textAlign: 'left',
-    fontFamily: 'sans-serif',
+    fontFamily: 'Work Sans',
+    fontId: 'gfont-work-sans',
+    lineHeight: 1.3,
   };
+}
+
+// A picture the user adds from disk, fitted inside the slide.
+export function makeImageNode(
+  name: string,
+  dataUrl: string,
+  naturalW: number,
+  naturalH: number,
+  slideW: number,
+  slideH: number
+): SlideNode {
+  const fit = Math.min(1, (slideW * 0.6) / naturalW, (slideH * 0.6) / naturalH);
+  const width = Math.max(8, Math.round(naturalW * fit));
+  const height = Math.max(8, Math.round(naturalH * fit));
+  return {
+    id: uuidv4(),
+    type: 'image',
+    name,
+    x: Math.round((slideW - width) / 2),
+    y: Math.round((slideH - height) / 2),
+    width,
+    height,
+    visible: true,
+    opacity: 1,
+    rotation: 0,
+    imageUrl: dataUrl,
+    imageReplaced: true,
+    role: 'image',
+  };
+}
+
+// Read a user-picked image file as a data URL plus its natural size.
+export function readImageFile(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the file.'));
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      const img = new Image();
+      img.onload = () => resolve({ dataUrl, width: img.naturalWidth || 400, height: img.naturalHeight || 300 });
+      img.onerror = () => reject(new Error('The file is not a supported image.'));
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 // ─── Misc Helpers ─────────────────────────────────────────────────────────────
 
-export function isSlideLike(name: string): boolean {
-  const lowerName = name.toLowerCase();
-  const keywords = ['slide', 'cover', 'hero', 'title', 'intro', 'outro', 'closing', 'content', 'section'];
-  return keywords.some((k) => lowerName.includes(k));
-}
-
-export function groupComponentsByPath(
-  components: import('./types').ComponentInfo[]
-): Record<string, import('./types').ComponentInfo[]> {
-  const groups: Record<string, import('./types').ComponentInfo[]> = {};
-  for (const comp of components) {
-    const group = comp.path ? comp.path.split('/')[0] : 'Uncategorized';
-    if (!groups[group]) groups[group] = [];
-    groups[group].push(comp);
-  }
-  return groups;
-}
-
-export function getFilteredComponents(
-  components: import('./types').ComponentInfo[],
-  query: string
-): import('./types').ComponentInfo[] {
+export function getFilteredComponents(components: ComponentInfo[], query: string): ComponentInfo[] {
   if (!query.trim()) return components;
   const q = query.toLowerCase();
   return components.filter(
@@ -263,20 +303,6 @@ export function findNodeAbs(
     }
   }
   return null;
-}
-
-// Deep-clone a node tree and assign a fresh uuid to every descendant. The
-// clone is fully decoupled from the source so subsequent edits to the paste
-// don't mutate the clipboard.
-export function cloneNodeWithNewIds(node: SlideNode): SlideNode {
-  const copy: SlideNode =
-    typeof structuredClone === 'function' ? structuredClone(node) : JSON.parse(JSON.stringify(node));
-  const reassign = (n: SlideNode) => {
-    n.id = uuidv4();
-    if (n.children) n.children.forEach(reassign);
-  };
-  reassign(copy);
-  return copy;
 }
 
 // ─── Web font loading ─────────────────────────────────────────────────────────
@@ -394,7 +420,7 @@ function gradientToCss(g: NonNullable<PenpotFillLike['fillColorGradient']>): str
 // array is empty or contains only unsupported fills (e.g. pure image fills
 // with no resolvable URL) — callers should fall back to `node.imageUrl` or the
 // flat `fill` color.
-export function fillsToCss(fills: unknown[] | undefined): string | undefined {
+export function fillsToCss(fills: unknown[] | undefined, imageUrl?: string): string | undefined {
   if (!fills || fills.length === 0) return undefined;
 
   // Fast-path: one solid color.
@@ -416,12 +442,37 @@ export function fillsToCss(fills: unknown[] | undefined): string | undefined {
       const color = colorWithOpacity(f.fillColor, f.fillOpacity ?? 1);
       layers.push(`linear-gradient(${color}, ${color})`);
     }
-    // Image fills cannot be resolved from the UI bundle (the Penpot ImageData
-    // id is opaque here); caller uses `node.imageUrl` as a fallback.
+    else if (f.fillImage && imageUrl) {
+      // The picture was read by the importer (or replaced in the editor);
+      // it keeps its place in the stack so overlays still cover it.
+      layers.push(`center / cover no-repeat url("${imageUrl}")`);
+    }
   }
 
   if (layers.length === 0) return undefined;
   return layers.join(', ');
+}
+
+// An image fill paints on top of the colour fills of the stack (it is
+// usually the last fill), stretched like Penpot's "fill" image mode.
+export function nodeBackground(
+  fills: unknown[] | undefined,
+  flat: string | undefined,
+  imageUrl: string | undefined
+): string | undefined {
+  const hasImageFill = (fills ?? []).some((f) => !!(f as { fillImage?: unknown }).fillImage);
+  if (hasImageFill && imageUrl) return fillsToCss(fills, imageUrl);
+  return withImageLayer(fillsToCss(fills) ?? flat, imageUrl);
+}
+
+function withImageLayer(background: string | undefined, imageUrl: string | undefined): string | undefined {
+  if (!imageUrl) return background;
+  const image = `center / cover no-repeat url("${imageUrl}")`;
+  return background && background !== 'transparent' ? `${image}, ${background}` : image;
+}
+
+export function slideBackgroundCss(slide: Slide): string {
+  return nodeBackground(slide.backgroundFills, slide.background, slide.backgroundImageUrl) ?? slide.background;
 }
 
 // Pull the first usable solid color out of a fills array — used for text
@@ -480,31 +531,26 @@ export function withPrimaryFillColor(fills: unknown[] | undefined, hex: string):
   return fills.map((raw, i) => (i === idx ? solid(raw as PenpotFillLike) : raw));
 }
 
-// ─── Imported components → slides ─────────────────────────────────────────────
+// Replace the primary fill with a complete fill (e.g. a library color that
+// carries `fillColorRefId` / `fillColorRefFile`, which keeps the link in
+// Penpot), keeping the rest of the stack.
+export function withPrimaryFill(fills: unknown[] | undefined, fill: Record<string, unknown>): unknown[] {
+  if (!fills || fills.length === 0) return [fill];
+  const idx = fills.findIndex((raw) => {
+    const f = raw as PenpotFillLike;
+    return !!f.fillColor && !f.fillColorGradient && !f.fillImage;
+  });
+  if (idx === -1) return [fill, ...fills];
+  return fills.map((raw, i) => (i === idx ? fill : raw));
+}
 
-// Build a slide from an imported (possibly cached) component. Node ids are
-// regenerated so the same template can be added several times without two
-// slides sharing ids (selection, copy/paste and history rely on uniqueness).
-export function slideFromImported(
-  payload: import('./types').ImportedComponentPayload,
-  fallback: { name: string; width?: number; height?: number; thumbnailUrl?: string }
-): Slide {
-  const defaultSize = SLIDE_SIZE_PRESETS['16:9'];
-  return {
-    id: uuidv4(),
-    name: payload.componentName || fallback.name,
-    source: 'library-component',
-    width: payload.width || fallback.width || defaultSize.width,
-    height: payload.height || fallback.height || defaultSize.height,
-    background: payload.background,
-    backgroundFills: payload.backgroundFills,
-    nodes: payload.nodes.map(cloneNodeWithNewIds),
-    libraryId: payload.libraryId,
-    componentId: payload.componentId,
-    componentName: payload.componentName,
-    thumbnailUrl: fallback.thumbnailUrl,
-    nodesLoading: false,
-  };
+// Id of the library color the primary fill is linked to, if any.
+export function primaryFillRef(fills: unknown[] | undefined): string | undefined {
+  for (const raw of fills ?? []) {
+    const f = raw as PenpotFillLike & { fillColorRefId?: string };
+    if (f.fillColor && !f.fillColorGradient && !f.fillImage) return f.fillColorRefId;
+  }
+  return undefined;
 }
 
 // ─── Text rendering ───────────────────────────────────────────────────────────

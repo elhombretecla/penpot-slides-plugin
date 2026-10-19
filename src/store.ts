@@ -2,16 +2,22 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { penpotApi } from './api';
 import type {
+  AvailableLibrary,
+  Deck,
+  DeckSummary,
   Slide,
   SlideNode,
+  LibraryCatalog,
   LibraryInfo,
-  ComponentInfo,
   ExportSettings,
   ImportJob,
   ImportItemRequest,
   ImportJobError,
+  ImportPurpose,
   ImportedComponentPayload,
 } from './types';
+import { cloneNodeWithNewIds, createDeck } from './deck';
+import { readThumbnails, writeThumbnail } from './thumbCache';
 
 export type Screen = 'home' | 'library-picker' | 'slide-manager';
 
@@ -21,7 +27,27 @@ export interface Notice {
   message: string;
   details?: string[];
 }
-export type SidePanel = 'properties' | 'layers';
+export type SidePanel = 'properties' | 'layers' | 'insert';
+
+export type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error';
+
+// Deck metadata; the slides live in the top-level `slides` array so every
+// editor component keeps working on them directly.
+export type DeckMeta = Omit<Deck, 'slides'>;
+
+// What the template gallery is opened for.
+export type PickerIntent =
+  | { kind: 'new-deck' }
+  | { kind: 'add-slides'; afterSlideId: string | null }
+  | { kind: 'change-layout'; slideId: string };
+
+export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
+  spacing: 100,
+  wrapInDeck: false,
+  createNewPage: true,
+  slidePrefix: 'Slide',
+  createFlow: true,
+};
 
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
 // All slide node operations are recursive so that grouped / nested imports
@@ -107,17 +133,19 @@ function cacheKey(libraryId: string, componentId: string): string {
   return `${libraryId}:${componentId}`;
 }
 
-function regenerateNodeIds(nodes: SlideNode[]): SlideNode[] {
-  return nodes.map((n) => ({
-    ...n,
-    id: uuidv4(),
-    children: n.children ? regenerateNodeIds(n.children) : undefined,
-  }));
-}
-
 // Coalescing state lives outside the store: it never needs to re-render UI.
 const HISTORY_COALESCE_MS = 1000;
 let lastCoalesced: { key: string; at: number } | null = null;
+
+
+// Slot content the user touched — drives "change layout" (only edited
+// content travels to the new template).
+function markEdited(node: SlideNode, updates: Partial<SlideNode>): Partial<SlideNode> {
+  if (!node.slotId || node.edited) return updates;
+  const touchesContent =
+    ('text' in updates && updates.text !== node.text) || ('imageUrl' in updates && updates.imageReplaced);
+  return touchesContent ? { ...updates, edited: true } : updates;
+}
 
 // ─── Store Definition ─────────────────────────────────────────────────────────
 
@@ -130,26 +158,45 @@ interface SlideStore {
   theme: 'light' | 'dark';
   setTheme: (theme: 'light' | 'dark') => void;
 
-  // ── Libraries ──────────────────────────────────────────────────────────────
+  // ── File & decks ───────────────────────────────────────────────────────────
+  fileName: string;
+  decks: DeckSummary[];
+  decksLoaded: boolean;
+  setDecks: (decks: DeckSummary[]) => void;
+  // The open deck (null on the home screen).
+  deck: DeckMeta | null;
+  saveStatus: SaveStatus;
+  saveError: string | null;
+  setSaveStatus: (status: SaveStatus, error?: string | null) => void;
+  newDeck: (name: string, library?: { id: string; name: string }) => void;
+  openDeck: (deck: Deck) => void;
+  closeDeck: () => void;
+  updateDeck: (patch: Partial<Pick<DeckMeta, 'name' | 'libraryId' | 'libraryName'>>) => void;
+  getDeckSnapshot: () => Deck | null;
+
+  // ── Libraries & catalog ────────────────────────────────────────────────────
   libraries: LibraryInfo[];
-  setLibraries: (libs: LibraryInfo[]) => void;
+  setLibraries: (libs: LibraryInfo[], fileName: string) => void;
   librariesLoading: boolean;
   setLibrariesLoading: (v: boolean) => void;
+  availableLibraries: AvailableLibrary[] | null;
+  setAvailableLibraries: (libs: AvailableLibrary[] | null) => void;
 
-  componentsMap: Record<string, ComponentInfo[]>;
-  setComponents: (libraryId: string, components: ComponentInfo[]) => void;
-  receiveComponents: (requestId: string, libraryId: string, components: ComponentInfo[]) => void;
-  componentsLoading: boolean;
-  setComponentsLoading: (v: boolean) => void;
+  catalogs: Record<string, LibraryCatalog>;
+  catalogRequestId: string | null;
+  catalogLoading: boolean;
+  requestCatalog: (libraryId: string) => void;
+  receiveCatalog: (requestId: string, catalog: LibraryCatalog) => void;
 
-  // Thumbnails are cached by component id for the whole session — switching
-  // libraries never throws them away. Only the latest components request may
-  // update the pending set (older, cancelled requests are ignored).
+  // Thumbnails are cached by component id across sessions (IndexedDB) and
+  // validated by the plugin's signature. Only the latest request drives the
+  // pending set; late thumbnails from older requests are still cached.
   thumbnailsMap: Record<string, string>;
+  thumbnailSignatures: Record<string, string>;
   thumbnailsPending: Set<string>;
-  componentsRequestId: string | null;
-  requestComponents: (libraryId: string) => void;
-  setThumbnail: (requestId: string, componentId: string, thumbnail: string) => void;
+  thumbnailsRequestId: string | null;
+  requestThumbnails: (libraryId: string, force?: boolean) => Promise<void>;
+  setThumbnail: (requestId: string, componentId: string, thumbnail: string, signature: string) => void;
   finishThumbnails: (requestId: string) => void;
 
   // ── Notices (toasts) ───────────────────────────────────────────────────────
@@ -157,33 +204,28 @@ interface SlideStore {
   pushNotice: (kind: Notice['kind'], message: string, details?: string[]) => void;
   dismissNotice: (id: string) => void;
 
-  selectedComponentIds: Set<string>;
-  toggleComponentSelection: (componentId: string, libraryId: string) => void;
+  // ── Template gallery ───────────────────────────────────────────────────────
+  pickerIntent: PickerIntent;
+  openPicker: (intent: PickerIntent, libraryId?: string | null) => void;
+  selectedComponentIds: string[];
+  toggleComponentSelection: (componentId: string) => void;
   clearComponentSelection: () => void;
-  selectedComponentLibraryMap: Record<string, string>;
 
   // ── Import Pipeline ────────────────────────────────────────────────────────
   importJob: ImportJob | null;
   importedComponentsCache: Record<string, ImportedComponentPayload>;
-  startImportJob: (items: ImportItemRequest[]) => string;
-  reportImportProgress: (
-    requestId: string,
-    index: number,
-    total: number,
-    componentName: string
-  ) => void;
-  reportImportItem: (
-    requestId: string,
-    payload: ImportedComponentPayload,
-    warnings: string[]
-  ) => void;
+  startImportJob: (items: ImportItemRequest[], purpose: ImportPurpose) => string;
+  reportImportProgress: (requestId: string, componentName: string) => void;
+  reportImportItem: (requestId: string, payload: ImportedComponentPayload, warnings: string[]) => void;
   reportImportError: (requestId: string, error: ImportJobError) => void;
   finishImportJob: (requestId: string) => void;
   clearImportJob: () => void;
-  getCachedComponent: (
-    libraryId: string,
-    componentId: string
-  ) => ImportedComponentPayload | null;
+  getCachedComponent: (libraryId: string, componentId: string) => ImportedComponentPayload | null;
+
+  // Library elements being fetched for insertion: requestId → target slide.
+  pendingAssets: Record<string, { slideId: string }>;
+  requestAsset: (slideId: string, libraryId: string, componentId: string) => void;
+  resolveAsset: (requestId: string) => { slideId: string } | null;
 
   // ── Slides ─────────────────────────────────────────────────────────────────
   slides: Slide[];
@@ -205,9 +247,8 @@ interface SlideStore {
   undo: () => void;
   redo: () => void;
 
-  setSlides: (slides: Slide[]) => void;
-  addSlide: (slide: Slide) => void;
-  addSlides: (slides: Slide[]) => void;
+  addSlides: (slides: Slide[], afterSlideId?: string | null) => void;
+  replaceSlide: (slide: Slide) => void;
   updateSlide: (id: string, updates: Partial<Omit<Slide, 'nodes'>>) => void;
   deleteSlide: (id: string) => void;
   duplicateSlide: (id: string) => void;
@@ -219,9 +260,7 @@ interface SlideStore {
   updateNode: (slideId: string, nodeId: string, updates: Partial<SlideNode>) => void;
   deleteNode: (slideId: string, nodeId: string) => void;
   reorderNode: (slideId: string, nodeId: string, direction: StackDirection) => void;
-  setSlideNodes: (slideId: string, nodes: SlideNode[], background?: string) => void;
   selectNode: (nodeId: string | null) => void;
-  addSelectedNode: (nodeId: string) => void;
   setSelectedNodes: (ids: string[]) => void;
 
   // ── Export ─────────────────────────────────────────────────────────────────
@@ -238,12 +277,14 @@ interface SlideStore {
   showExportPanel: boolean;
   setShowExportPanel: (v: boolean) => void;
 
-  // ── Search (Library Picker) ────────────────────────────────────────────────
+  // ── Search (gallery) ───────────────────────────────────────────────────────
   searchQuery: string;
   setSearchQuery: (q: string) => void;
   activeLibraryId: string | null;
   setActiveLibraryId: (id: string | null) => void;
 }
+
+const EMPTY_HISTORY = { past: [] as Slide[][], future: [] as Slide[][] };
 
 export const useSlideStore = create<SlideStore>((set, get) => ({
   // ── Navigation ─────────────────────────────────────────────────────────────
@@ -254,52 +295,134 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   theme: 'dark',
   setTheme: (theme) => set({ theme }),
 
-  // ── Libraries ──────────────────────────────────────────────────────────────
+  // ── File & decks ───────────────────────────────────────────────────────────
+  fileName: '',
+  decks: [],
+  decksLoaded: false,
+  setDecks: (decks) => set({ decks, decksLoaded: true }),
+  deck: null,
+  saveStatus: 'saved',
+  saveError: null,
+  setSaveStatus: (saveStatus, error = null) => set({ saveStatus, saveError: error }),
+  newDeck: (name, library) => {
+    const { slides: _slides, ...meta } = createDeck(name, library);
+    void _slides;
+    set({
+      deck: meta,
+      slides: [],
+      activeSlideId: null,
+      selectedNodeIds: [],
+      history: EMPTY_HISTORY,
+      exportSettings: { ...DEFAULT_EXPORT_SETTINGS },
+      activeLibraryId: library?.id ?? get().activeLibraryId,
+      // A brand-new deck is saved on its first change, not before: an empty
+      // deck the user abandons should not litter the file.
+      saveStatus: 'saved',
+      saveError: null,
+    });
+  },
+  openDeck: (deck) => {
+    const { slides, ...meta } = deck;
+    lastCoalesced = null;
+    set({
+      deck: meta,
+      slides,
+      activeSlideId: slides[0]?.id ?? null,
+      selectedNodeIds: [],
+      history: EMPTY_HISTORY,
+      exportSettings: { ...DEFAULT_EXPORT_SETTINGS, ...deck.exportSettings },
+      activeLibraryId: deck.libraryId ?? get().activeLibraryId,
+      saveStatus: 'saved',
+      saveError: null,
+      screen: 'slide-manager',
+    });
+  },
+  closeDeck: () =>
+    set({
+      deck: null,
+      slides: [],
+      activeSlideId: null,
+      selectedNodeIds: [],
+      history: EMPTY_HISTORY,
+      screen: 'home',
+    }),
+  updateDeck: (patch) =>
+    set((state) => (state.deck ? { deck: { ...state.deck, ...patch } } : state)),
+  getDeckSnapshot: () => {
+    const { deck, slides, exportSettings } = get();
+    if (!deck) return null;
+    return { ...deck, slides, exportSettings };
+  },
+
+  // ── Libraries & catalog ────────────────────────────────────────────────────
   libraries: [],
-  setLibraries: (libraries) => set({ libraries }),
+  setLibraries: (libraries, fileName) => set({ libraries, fileName, librariesLoading: false }),
   librariesLoading: false,
   setLibrariesLoading: (librariesLoading) => set({ librariesLoading }),
+  availableLibraries: null,
+  setAvailableLibraries: (availableLibraries) => set({ availableLibraries }),
 
-  componentsMap: {},
-  setComponents: (libraryId, components) =>
+  catalogs: {},
+  catalogRequestId: null,
+  catalogLoading: false,
+  requestCatalog: (libraryId) => {
+    const requestId = uuidv4();
+    set({ catalogRequestId: requestId, catalogLoading: !get().catalogs[libraryId] });
+    penpotApi.getCatalog(requestId, libraryId);
+  },
+  receiveCatalog: (requestId, catalog) => {
     set((state) => ({
-      componentsMap: { ...state.componentsMap, [libraryId]: components },
-    })),
-  receiveComponents: (requestId, libraryId, components) =>
-    set((state) => ({
-      componentsMap: { ...state.componentsMap, [libraryId]: components },
-      componentsLoading: false,
-      thumbnailsPending:
-        requestId === state.componentsRequestId
-          ? new Set(components.filter((c) => !state.thumbnailsMap[c.id]).map((c) => c.id))
-          : state.thumbnailsPending,
-    })),
-  componentsLoading: false,
-  setComponentsLoading: (componentsLoading) => set({ componentsLoading }),
+      catalogs: { ...state.catalogs, [catalog.libraryId]: catalog },
+      catalogLoading: requestId === state.catalogRequestId ? false : state.catalogLoading,
+    }));
+    if (requestId === get().catalogRequestId) void get().requestThumbnails(catalog.libraryId);
+  },
 
   thumbnailsMap: {},
+  thumbnailSignatures: {},
   thumbnailsPending: new Set(),
-  componentsRequestId: null,
-  requestComponents: (libraryId) => {
+  thumbnailsRequestId: null,
+  requestThumbnails: async (libraryId, force = false) => {
     const requestId = uuidv4();
-    const known = Object.keys(get().thumbnailsMap);
-    set({ componentsRequestId: requestId });
-    penpotApi.getComponents(requestId, libraryId, known);
+    const catalog = get().catalogs[libraryId];
+    const ids = catalog?.components.map((c) => c.id) ?? [];
+    set({ thumbnailsRequestId: requestId });
+
+    // Show cached thumbnails right away; the plugin then re-renders only the
+    // components whose signature changed.
+    const missing = ids.filter((id) => !get().thumbnailsMap[id]);
+    const cached = await readThumbnails(missing);
+    if (get().thumbnailsRequestId !== requestId) return;
+    const thumbs = { ...get().thumbnailsMap };
+    const sigs = { ...get().thumbnailSignatures };
+    for (const [id, v] of Object.entries(cached)) {
+      thumbs[id] = v.thumbnail;
+      sigs[id] = v.signature;
+    }
+    const known: Record<string, string> = {};
+    for (const id of ids) if (thumbs[id] && sigs[id]) known[id] = sigs[id];
+    set({
+      thumbnailsMap: thumbs,
+      thumbnailSignatures: sigs,
+      thumbnailsPending: new Set(force ? ids : ids.filter((id) => !thumbs[id])),
+    });
+    penpotApi.getThumbnails(requestId, libraryId, known, force);
   },
-  setThumbnail: (requestId, componentId, thumbnail) =>
+  setThumbnail: (requestId, componentId, thumbnail, signature) => {
+    void writeThumbnail(componentId, { thumbnail, signature });
     set((state) => {
-      // Late thumbnails from a superseded request are still valid images —
-      // cache them, but only the current request drives the pending set.
       const next = new Set(state.thumbnailsPending);
-      if (requestId === state.componentsRequestId) next.delete(componentId);
+      if (requestId === state.thumbnailsRequestId) next.delete(componentId);
       return {
         thumbnailsMap: { ...state.thumbnailsMap, [componentId]: thumbnail },
+        thumbnailSignatures: { ...state.thumbnailSignatures, [componentId]: signature },
         thumbnailsPending: next,
       };
-    }),
+    });
+  },
   finishThumbnails: (requestId) =>
     set((state) =>
-      requestId === state.componentsRequestId ? { thumbnailsPending: new Set<string>() } : state
+      requestId === state.thumbnailsRequestId ? { thumbnailsPending: new Set<string>() } : state
     ),
 
   notices: [],
@@ -310,28 +433,34 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     })),
   dismissNotice: (id) => set((state) => ({ notices: state.notices.filter((n) => n.id !== id) })),
 
-  selectedComponentIds: new Set(),
-  selectedComponentLibraryMap: {},
-  toggleComponentSelection: (componentId, libraryId) =>
+  // ── Template gallery ───────────────────────────────────────────────────────
+  pickerIntent: { kind: 'new-deck' },
+  openPicker: (pickerIntent, libraryId) =>
+    set((state) => ({
+      pickerIntent,
+      screen: 'library-picker',
+      selectedComponentIds: [],
+      searchQuery: '',
+      activeLibraryId: libraryId ?? state.deck?.libraryId ?? state.activeLibraryId,
+    })),
+  selectedComponentIds: [],
+  toggleComponentSelection: (componentId) =>
     set((state) => {
-      const next = new Set(state.selectedComponentIds);
-      const nextMap = { ...state.selectedComponentLibraryMap };
-      if (next.has(componentId)) {
-        next.delete(componentId);
-        delete nextMap[componentId];
-      } else {
-        next.add(componentId);
-        nextMap[componentId] = libraryId;
-      }
-      return { selectedComponentIds: next, selectedComponentLibraryMap: nextMap };
+      // Changing a layout picks exactly one template.
+      if (state.pickerIntent.kind === 'change-layout') return { selectedComponentIds: [componentId] };
+      const has = state.selectedComponentIds.includes(componentId);
+      return {
+        selectedComponentIds: has
+          ? state.selectedComponentIds.filter((id) => id !== componentId)
+          : [...state.selectedComponentIds, componentId],
+      };
     }),
-  clearComponentSelection: () =>
-    set({ selectedComponentIds: new Set(), selectedComponentLibraryMap: {} }),
+  clearComponentSelection: () => set({ selectedComponentIds: [] }),
 
   // ── Import Pipeline ────────────────────────────────────────────────────────
   importJob: null,
   importedComponentsCache: {},
-  startImportJob: (items) => {
+  startImportJob: (items, purpose) => {
     const requestId = uuidv4();
     set({
       importJob: {
@@ -344,29 +473,28 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         warnings: [],
         status: 'running',
         currentComponentName: items[0]?.componentName,
+        purpose,
       },
     });
     return requestId;
   },
-  reportImportProgress: (requestId, _index, _total, componentName) =>
+  reportImportProgress: (requestId, componentName) =>
     set((state) => {
       if (!state.importJob || state.importJob.requestId !== requestId) return state;
-      return {
-        importJob: {
-          ...state.importJob,
-          currentComponentName: componentName,
-        },
-      };
+      return { importJob: { ...state.importJob, currentComponentName: componentName } };
     }),
   reportImportItem: (requestId, payload, warnings) =>
     set((state) => {
       if (!state.importJob || state.importJob.requestId !== requestId) return state;
       const key = cacheKey(payload.libraryId, payload.componentId);
+      // A template opened from its own file reports the local library id;
+      // cache under the requested id too so lookups by either id hit.
+      const requested = state.importJob.items.find((i) => i.componentId === payload.componentId);
+      const extra = requested && requested.libraryId !== payload.libraryId
+        ? { [cacheKey(requested.libraryId, payload.componentId)]: payload }
+        : {};
       return {
-        importedComponentsCache: {
-          ...state.importedComponentsCache,
-          [key]: payload,
-        },
+        importedComponentsCache: { ...state.importedComponentsCache, [key]: payload, ...extra },
         importJob: {
           ...state.importJob,
           done: state.importJob.done + 1,
@@ -388,17 +516,28 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   finishImportJob: (requestId) =>
     set((state) => {
       if (!state.importJob || state.importJob.requestId !== requestId) return state;
-      return {
-        importJob: {
-          ...state.importJob,
-          status: 'complete',
-        },
-      };
+      return { importJob: { ...state.importJob, status: 'complete' } };
     }),
   clearImportJob: () => set({ importJob: null }),
-  getCachedComponent: (libraryId, componentId) => {
-    const key = cacheKey(libraryId, componentId);
-    return get().importedComponentsCache[key] ?? null;
+  getCachedComponent: (libraryId, componentId) =>
+    get().importedComponentsCache[cacheKey(libraryId, componentId)] ?? null,
+
+  pendingAssets: {},
+  requestAsset: (slideId, libraryId, componentId) => {
+    const requestId = uuidv4();
+    set((state) => ({ pendingAssets: { ...state.pendingAssets, [requestId]: { slideId } } }));
+    penpotApi.getAsset(requestId, libraryId, componentId);
+  },
+  resolveAsset: (requestId) => {
+    const target = get().pendingAssets[requestId] ?? null;
+    if (target) {
+      set((state) => {
+        const next = { ...state.pendingAssets };
+        delete next[requestId];
+        return { pendingAssets: next };
+      });
+    }
+    return target;
   },
 
   // ── Slides ─────────────────────────────────────────────────────────────────
@@ -408,7 +547,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   sidePanel: 'properties',
   setSidePanel: (sidePanel) => set({ sidePanel }),
 
-  history: { past: [], future: [] },
+  history: EMPTY_HISTORY,
   commitHistory: () =>
     set((state) => ({
       history: {
@@ -464,16 +603,18 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       };
     }),
 
-  setSlides: (slides) => set({ slides }),
-  addSlide: (slide) =>
+  addSlides: (slides, afterSlideId) =>
+    set((state) => {
+      if (slides.length === 0) return state;
+      const idx = afterSlideId ? state.slides.findIndex((s) => s.id === afterSlideId) : -1;
+      const next = [...state.slides];
+      next.splice(idx === -1 ? next.length : idx + 1, 0, ...slides);
+      return { slides: next, activeSlideId: slides[0].id, selectedNodeIds: [] };
+    }),
+  replaceSlide: (slide) =>
     set((state) => ({
-      slides: [...state.slides, slide],
-      activeSlideId: slide.id,
-    })),
-  addSlides: (slides) =>
-    set((state) => ({
-      slides: [...state.slides, ...slides],
-      activeSlideId: slides[slides.length - 1]?.id ?? state.activeSlideId,
+      slides: state.slides.map((s) => (s.id === slide.id ? slide : s)),
+      selectedNodeIds: [],
     })),
   updateSlide: (id, updates) =>
     set((state) => ({
@@ -481,9 +622,12 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
     })),
   deleteSlide: (id) =>
     set((state) => {
+      const idx = state.slides.findIndex((s) => s.id === id);
       const remaining = state.slides.filter((s) => s.id !== id);
       const wasActive = state.activeSlideId === id;
-      const newActive = wasActive ? (remaining[0]?.id ?? null) : state.activeSlideId;
+      // Select the neighbour, like every slide editor does.
+      const neighbour = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)];
+      const newActive = wasActive ? (neighbour?.id ?? null) : state.activeSlideId;
       return { slides: remaining, activeSlideId: newActive, selectedNodeIds: [] };
     }),
   duplicateSlide: (id) => {
@@ -494,7 +638,7 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       ...src,
       id: uuidv4(),
       name: `${src.name} (copy)`,
-      nodes: regenerateNodeIds(src.nodes),
+      nodes: src.nodes.map((n) => cloneNodeWithNewIds(n, true)),
     };
     set((state) => {
       const idx = state.slides.findIndex((s) => s.id === id);
@@ -510,39 +654,18 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       next.splice(toIndex, 0, moved);
       return { slides: next };
     }),
-  setActiveSlide: (activeSlideId) =>
-    set({ activeSlideId, selectedNodeIds: [] }),
+  setActiveSlide: (activeSlideId) => set({ activeSlideId, selectedNodeIds: [] }),
 
   // ── Nodes ──────────────────────────────────────────────────────────────────
-  // setSlideNodes keeps the original source (library-component vs custom) so
-  // imported slides remain traceable to their library origin after editing.
-  setSlideNodes: (slideId, nodes, background) =>
-    set((state) => ({
-      slides: state.slides.map((s) =>
-        s.id === slideId
-          ? {
-              ...s,
-              nodes,
-              nodesLoading: false,
-              ...(background ? { background } : {}),
-            }
-          : s
-      ),
-    })),
   addNode: (slideId, node) =>
     set((state) => ({
-      slides: state.slides.map((s) =>
-        s.id === slideId ? { ...s, nodes: [...s.nodes, node] } : s
-      ),
+      slides: state.slides.map((s) => (s.id === slideId ? { ...s, nodes: [...s.nodes, node] } : s)),
     })),
   updateNode: (slideId, nodeId, updates) =>
     set((state) => ({
       slides: state.slides.map((s) =>
         s.id === slideId
-          ? {
-              ...s,
-              nodes: mapNodes(s.nodes, nodeId, (n) => ({ ...n, ...updates })),
-            }
+          ? { ...s, nodes: mapNodes(s.nodes, nodeId, (n) => ({ ...n, ...markEdited(n, updates) })) }
           : s
       ),
     })),
@@ -561,27 +684,13 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
         return { ...s, nodes: res.nodes };
       }),
     })),
-  selectNode: (nodeId) =>
-    set({ selectedNodeIds: nodeId ? [nodeId] : [] }),
-  addSelectedNode: (nodeId) =>
-    set((state) => ({
-      selectedNodeIds: state.selectedNodeIds.includes(nodeId)
-        ? state.selectedNodeIds.filter((id) => id !== nodeId)
-        : [...state.selectedNodeIds, nodeId],
-    })),
+  selectNode: (nodeId) => set({ selectedNodeIds: nodeId ? [nodeId] : [] }),
   setSelectedNodes: (ids) => set({ selectedNodeIds: ids }),
 
   // ── Export ─────────────────────────────────────────────────────────────────
-  exportSettings: {
-    spacing: 100,
-    wrapInDeck: true,
-    createNewPage: false,
-    slidePrefix: 'Slide',
-  },
+  exportSettings: { ...DEFAULT_EXPORT_SETTINGS },
   setExportSettings: (settings) =>
-    set((state) => ({
-      exportSettings: { ...state.exportSettings, ...settings },
-    })),
+    set((state) => ({ exportSettings: { ...state.exportSettings, ...settings } })),
   isInserting: false,
   setIsInserting: (isInserting) => set({ isInserting }),
   insertResult: null,

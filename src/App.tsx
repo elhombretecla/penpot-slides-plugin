@@ -1,7 +1,11 @@
 import { useEffect } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { useSlideStore } from './store';
-import type { PluginMessage, Slide } from './types';
-import { slideFromImported } from './utils';
+import type { PluginMessage } from './types';
+import { parseDeck } from './deck';
+import { onDeckSaved, startAutosave } from './autosave';
+import { finishTemplateJob } from './templateActions';
+import { penpotApi } from './api';
 import HomeScreen from './screens/HomeScreen';
 import LibraryPicker from './screens/LibraryPicker';
 import SlideManager from './screens/SlideManager';
@@ -13,12 +17,6 @@ export default function App() {
   const screen = useSlideStore((s) => s.screen);
   const theme = useSlideStore((s) => s.theme);
   const setTheme = useSlideStore((s) => s.setTheme);
-  const setLibraries = useSlideStore((s) => s.setLibraries);
-  const setLibrariesLoading = useSlideStore((s) => s.setLibrariesLoading);
-  const setComponentsLoading = useSlideStore((s) => s.setComponentsLoading);
-  const setIsInserting = useSlideStore((s) => s.setIsInserting);
-  const setInsertResult = useSlideStore((s) => s.setInsertResult);
-  const setThumbnail = useSlideStore((s) => s.setThumbnail);
   const showNewSlideModal = useSlideStore((s) => s.showNewSlideModal);
 
   // Read theme from URL param on mount
@@ -33,32 +31,44 @@ export default function App() {
     document.body.dataset.theme = theme;
   }, [theme]);
 
+  useEffect(() => startAutosave(), []);
+
   // Listen to messages from plugin.ts
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const data = event.data as PluginMessage & { source?: string };
+      if (!data) return;
 
       if (data.source === 'penpot' && 'theme' in data) {
         setTheme((data as { theme: 'light' | 'dark' }).theme);
         return;
       }
-
-      if (!data || !data.type) return;
+      if (!data.type) return;
 
       const store = useSlideStore.getState();
 
       switch (data.type) {
         case 'libraries':
-          setLibraries(data.libraries);
-          setLibrariesLoading(false);
+          store.setLibraries(data.libraries, data.fileName);
           break;
 
-        case 'components':
-          store.receiveComponents(data.requestId, data.libraryId, data.components);
+        case 'available-libraries':
+          store.setAvailableLibraries(data.libraries);
+          break;
+
+        case 'library-connected':
+          store.setAvailableLibraries(
+            (store.availableLibraries ?? []).filter((l) => l.id !== data.libraryId)
+          );
+          store.pushNotice('success', 'Library connected to this file.');
+          break;
+
+        case 'catalog':
+          store.receiveCatalog(data.requestId, data.catalog);
           break;
 
         case 'thumbnail':
-          setThumbnail(data.requestId, data.componentId, data.thumbnail);
+          store.setThumbnail(data.requestId, data.componentId, data.thumbnail, data.signature);
           break;
 
         case 'thumbnails-complete':
@@ -66,31 +76,15 @@ export default function App() {
           break;
 
         case 'import-start':
-          // Job is already initialized by the UI before sending the request;
-          // ignore stale starts from previous requests.
+          // The job is initialised by the UI before the request is sent.
           break;
 
         case 'import-progress':
-          store.reportImportProgress(
-            data.requestId,
-            data.index,
-            data.total,
-            data.componentName
-          );
+          store.reportImportProgress(data.requestId, data.componentName);
           break;
 
         case 'import-item':
-          store.reportImportItem(data.requestId, {
-            componentId: data.componentId,
-            libraryId: data.libraryId,
-            componentName: data.componentName,
-            nodes: data.nodes,
-            background: data.background,
-            backgroundFills: data.backgroundFills,
-            width: data.width,
-            height: data.height,
-            importedAt: Date.now(),
-          }, data.warnings ?? []);
+          store.reportImportItem(data.requestId, { ...data.payload, importedAt: Date.now() }, data.warnings ?? []);
           break;
 
         case 'import-item-error':
@@ -101,15 +95,42 @@ export default function App() {
           });
           break;
 
-        case 'import-complete': {
+        case 'import-complete':
           store.finishImportJob(data.requestId);
-          finalizeImport(data.requestId);
+          finishTemplateJob(data.requestId);
+          break;
+
+        case 'asset': {
+          const target = store.resolveAsset(data.requestId);
+          if (!target) break;
+          if (!data.node) {
+            store.pushNotice('error', 'The element could not be inserted.', data.message ? [data.message] : undefined);
+            break;
+          }
+          const slide = store.slides.find((s) => s.id === target.slideId);
+          if (!slide) break;
+          // Fit big elements inside the slide and drop them in the centre.
+          const fit = Math.min(1, (slide.width * 0.5) / data.node.width, (slide.height * 0.5) / data.node.height);
+          const width = data.node.width * fit;
+          const height = data.node.height * fit;
+          const node = {
+            ...data.node,
+            id: uuidv4(),
+            width,
+            height,
+            x: (slide.width - width) / 2,
+            y: (slide.height - height) / 2,
+          };
+          store.commitHistory();
+          store.addNode(slide.id, node);
+          store.selectNode(node.id);
+          store.setSidePanel('properties');
           break;
         }
 
         case 'insert-complete':
-          setIsInserting(false);
-          setInsertResult({ count: data.count });
+          store.setIsInserting(false);
+          store.setInsertResult({ count: data.count });
           if (data.warnings.length > 0) {
             store.pushNotice(
               'warning',
@@ -119,10 +140,32 @@ export default function App() {
           }
           break;
 
+        case 'decks':
+          store.setDecks(data.decks);
+          break;
+
+        case 'deck-loaded':
+          if (!data.deck) {
+            store.pushNotice('error', 'This presentation is no longer in the file.');
+            penpotApi.listDecks();
+            break;
+          }
+          try {
+            store.openDeck(parseDeck(data.deck));
+          } catch (err) {
+            store.pushNotice('error', 'The presentation could not be opened.', [
+              err instanceof Error ? err.message : String(err),
+            ]);
+          }
+          break;
+
+        case 'deck-saved':
+          onDeckSaved(data.requestId, data.ok, data.message);
+          break;
+
         case 'error':
-          setIsInserting(false);
-          setLibrariesLoading(false);
-          setComponentsLoading(false);
+          store.setIsInserting(false);
+          store.setLibrariesLoading(false);
           console.error('[SlideBuilder]', data.message);
           store.pushNotice('error', data.message);
           break;
@@ -135,15 +178,7 @@ export default function App() {
 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [
-    setTheme,
-    setLibraries,
-    setLibrariesLoading,
-    setComponentsLoading,
-    setIsInserting,
-    setInsertResult,
-    setThumbnail,
-  ]);
+  }, [setTheme]);
 
   return (
     <div className="app-root">
@@ -155,60 +190,4 @@ export default function App() {
       <Notices />
     </div>
   );
-}
-
-// Once the plugin reports the batch import is done, build a slide for every
-// item that landed in the cache, transition to the editor, and clear the job
-// after a short delay so the user sees the completion state.
-function finalizeImport(requestId: string) {
-  const state = useSlideStore.getState();
-  const job = state.importJob;
-  if (!job || job.requestId !== requestId) return;
-
-  const newSlides: Slide[] = [];
-  for (const item of job.items) {
-    const cached = state.getCachedComponent(item.libraryId, item.componentId);
-    if (!cached) continue;
-    newSlides.push(
-      slideFromImported(cached, {
-        name: item.componentName,
-        width: item.width,
-        height: item.height,
-        thumbnailUrl: state.thumbnailsMap[cached.componentId],
-      })
-    );
-  }
-
-  if (newSlides.length > 0) {
-    state.addSlides(newSlides);
-    state.setScreen('slide-manager');
-  }
-
-  state.clearComponentSelection();
-
-  // The progress overlay closes after a moment, so failures must outlive it.
-  if (job.errors.length > 0) {
-    state.pushNotice(
-      'error',
-      `${job.errors.length} template${job.errors.length !== 1 ? 's' : ''} could not be imported.`,
-      job.errors.map((e) => `${e.componentName}: ${e.message}`)
-    );
-  }
-
-  if (job.warnings.length > 0) {
-    state.pushNotice(
-      'warning',
-      `Imported with ${job.warnings.length} issue${job.warnings.length !== 1 ? 's' : ''}: some elements were simplified or skipped.`,
-      [...new Set(job.warnings)]
-    );
-  }
-
-  // Keep the overlay visible briefly so the user sees the completion state,
-  // then dismiss it.
-  window.setTimeout(() => {
-    const current = useSlideStore.getState().importJob;
-    if (current && current.requestId === requestId) {
-      useSlideStore.getState().clearImportJob();
-    }
-  }, 600);
 }

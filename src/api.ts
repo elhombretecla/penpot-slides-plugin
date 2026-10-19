@@ -3,7 +3,7 @@
  * All functions send typed messages to plugin.ts and return void;
  * responses are handled in App.tsx via a global message listener.
  */
-import type { UIMessage, Slide, ExportSettings, ImportItemRequest } from './types';
+import type { UIMessage, Slide, ExportSettings, ImportItemRequest, DeckSummary } from './types';
 
 function send(message: UIMessage) {
   parent.postMessage(message, '*');
@@ -11,12 +11,21 @@ function send(message: UIMessage) {
 
 export const penpotApi = {
   getLibraries: () => send({ type: 'get-libraries' }),
-  getComponents: (requestId: string, libraryId: string, knownThumbnailIds: string[]) =>
-    send({ type: 'get-components', requestId, libraryId, knownThumbnailIds }),
+  getAvailableLibraries: () => send({ type: 'get-available-libraries' }),
+  connectLibrary: (libraryId: string) => send({ type: 'connect-library', libraryId }),
+  getCatalog: (requestId: string, libraryId: string) => send({ type: 'get-catalog', requestId, libraryId }),
+  getThumbnails: (requestId: string, libraryId: string, known: Record<string, string>, force: boolean) =>
+    send({ type: 'get-thumbnails', requestId, libraryId, known, force }),
   importComponents: (requestId: string, items: ImportItemRequest[]) =>
     send({ type: 'import-components', requestId, items }),
-  insertIntoCanvas: (slides: Slide[], settings: ExportSettings) =>
-    send({ type: 'insert-into-canvas', slides, settings }),
-  resize: (width: number, height: number) =>
-    send({ type: 'resize', width, height }),
+  getAsset: (requestId: string, libraryId: string, componentId: string) =>
+    send({ type: 'get-asset', requestId, libraryId, componentId }),
+  insertIntoCanvas: (deckId: string, deckName: string, slides: Slide[], settings: ExportSettings) =>
+    send({ type: 'insert-into-canvas', deckId, deckName, slides, settings }),
+  listDecks: () => send({ type: 'list-decks' }),
+  loadDeck: (deckId: string) => send({ type: 'load-deck', deckId }),
+  saveDeck: (requestId: string, deck: string, summary: DeckSummary) =>
+    send({ type: 'save-deck', requestId, deck, summary }),
+  deleteDeck: (deckId: string) => send({ type: 'delete-deck', deckId }),
+  resize: (width: number, height: number) => send({ type: 'resize', width, height }),
 };

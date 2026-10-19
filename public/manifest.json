@@ -3,5 +3,5 @@
   "description": "Create, edit, and export presentation slides directly into the Penpot canvas",
   "icon": "/icon.png",
   "code": "plugin.js",
-  "permissions": ["content:read", "content:write", "library:read", "allow:downloads"]
+  "permissions": ["content:read", "content:write", "library:read", "library:write", "allow:downloads"]
 }

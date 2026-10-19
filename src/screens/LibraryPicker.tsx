@@ -1,29 +1,29 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSlideStore } from '../store';
 import { penpotApi } from '../api';
-import { isSlideLike, getFilteredComponents, slideFromImported } from '../utils';
-import type { Slide, ComponentInfo, ImportItemRequest } from '../types';
+import { getFilteredComponents } from '../utils';
+import { applyTemplates, itemFromComponent } from '../templateActions';
+import type { ComponentInfo } from '../types';
 
 export default function LibraryPicker() {
-  const setScreen = useSlideStore((s) => s.setScreen);
   const libraries = useSlideStore((s) => s.libraries);
   const librariesLoading = useSlideStore((s) => s.librariesLoading);
   const setLibrariesLoading = useSlideStore((s) => s.setLibrariesLoading);
-  const componentsMap = useSlideStore((s) => s.componentsMap);
-  const componentsLoading = useSlideStore((s) => s.componentsLoading);
-  const setComponentsLoading = useSlideStore((s) => s.setComponentsLoading);
+  const catalogs = useSlideStore((s) => s.catalogs);
+  const catalogLoading = useSlideStore((s) => s.catalogLoading);
+  const requestCatalog = useSlideStore((s) => s.requestCatalog);
+  const requestThumbnails = useSlideStore((s) => s.requestThumbnails);
+  const thumbnailsPending = useSlideStore((s) => s.thumbnailsPending);
   const selectedComponentIds = useSlideStore((s) => s.selectedComponentIds);
-  const selectedComponentLibraryMap = useSlideStore((s) => s.selectedComponentLibraryMap);
   const toggleComponentSelection = useSlideStore((s) => s.toggleComponentSelection);
-  const clearComponentSelection = useSlideStore((s) => s.clearComponentSelection);
-  const addSlides = useSlideStore((s) => s.addSlides);
   const searchQuery = useSlideStore((s) => s.searchQuery);
   const setSearchQuery = useSlideStore((s) => s.setSearchQuery);
   const activeLibraryId = useSlideStore((s) => s.activeLibraryId);
   const setActiveLibraryId = useSlideStore((s) => s.setActiveLibraryId);
-  const requestComponents = useSlideStore((s) => s.requestComponents);
-  const startImportJob = useSlideStore((s) => s.startImportJob);
-  const getCachedComponent = useSlideStore((s) => s.getCachedComponent);
+  const intent = useSlideStore((s) => s.pickerIntent);
+  const deck = useSlideStore((s) => s.deck);
+  const setScreen = useSlideStore((s) => s.setScreen);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     if (libraries.length === 0) {
@@ -33,112 +33,80 @@ export default function LibraryPicker() {
   }, [libraries.length, setLibrariesLoading]);
 
   useEffect(() => {
-    if (activeLibraryId && !componentsMap[activeLibraryId]) {
-      setComponentsLoading(true);
-      requestComponents(activeLibraryId);
-    }
-  }, [activeLibraryId, componentsMap, setComponentsLoading, requestComponents]);
-
-  useEffect(() => {
     if (!activeLibraryId && libraries.length > 0) {
-      setActiveLibraryId(libraries[0].id);
+      setActiveLibraryId((libraries.find((l) => l.numSlides > 0) ?? libraries[0]).id);
     }
   }, [activeLibraryId, libraries, setActiveLibraryId]);
 
-  // Switching libraries supersedes (cancels) the running thumbnail job. The
-  // request is re-sent even for a cached list when some of its thumbnails
-  // never arrived — the plugin skips the ones the UI already has.
-  const handleLibraryChange = useCallback(
-    (libraryId: string) => {
-      setActiveLibraryId(libraryId);
-      const cached = componentsMap[libraryId];
-      if (!cached) setComponentsLoading(true);
-      const { thumbnailsMap } = useSlideStore.getState();
-      if (!cached || cached.some((c) => !thumbnailsMap[c.id])) requestComponents(libraryId);
-    },
-    [componentsMap, setActiveLibraryId, setComponentsLoading, requestComponents]
-  );
+  // (Re)load the catalog whenever the library changes: the list is cheap and
+  // the thumbnail pass only re-renders components that changed.
+  useEffect(() => {
+    if (activeLibraryId) requestCatalog(activeLibraryId);
+  }, [activeLibraryId, requestCatalog]);
 
-  const currentComponents: ComponentInfo[] = activeLibraryId
-    ? (componentsMap[activeLibraryId] ?? [])
-    : [];
+  const catalog = activeLibraryId ? catalogs[activeLibraryId] : undefined;
+  const all = useMemo(() => catalog?.components ?? [], [catalog]);
+  const slideCount = all.filter((c) => c.kind === 'slide').length;
+  // Libraries without recognisable layouts show everything.
+  const pool = showAll || slideCount === 0 ? all : all.filter((c) => c.kind === 'slide');
+  const filtered = getFilteredComponents(pool, searchQuery);
+  const grouped = groupBySection(filtered);
+  const selected = selectedComponentIds
+    .map((id) => all.find((c) => c.id === id))
+    .filter((c): c is ComponentInfo => !!c);
 
-  const filteredComponents = getFilteredComponents(currentComponents, searchQuery);
-  const grouped = groupBySection(filteredComponents);
+  const title =
+    intent.kind === 'change-layout'
+      ? 'Change layout'
+      : intent.kind === 'add-slides'
+        ? 'Add slides from a library'
+        : 'New presentation from a library';
 
-  const thumbnailsMap = useSlideStore((s) => s.thumbnailsMap);
+  function goBack() {
+    setScreen(deck ? 'slide-manager' : 'home');
+  }
 
-  function handleAddSelected() {
-    const selectedIds = Array.from(selectedComponentIds);
-    if (selectedIds.length === 0) return;
-
-    // Split into cached (instant) and uncached (need a plugin round-trip).
-    const cachedSlides: Slide[] = [];
-    const toImport: ImportItemRequest[] = [];
-
-    for (const componentId of selectedIds) {
-      const libraryId = selectedComponentLibraryMap[componentId] ?? '';
-      const comp = currentComponents.find((c) => c.id === componentId);
-      const name = comp?.name ?? 'Component';
-
-      const cached = getCachedComponent(libraryId, componentId);
-      if (cached) {
-        cachedSlides.push(
-          slideFromImported(cached, {
-            name,
-            width: comp?.width,
-            height: comp?.height,
-            thumbnailUrl: thumbnailsMap[componentId],
-          })
-        );
-      } else {
-        toImport.push({
-          componentId,
-          libraryId,
-          componentName: name,
-          width: comp?.width,
-          height: comp?.height,
-        });
-      }
-    }
-
-    if (cachedSlides.length > 0) {
-      addSlides(cachedSlides);
-    }
-
-    if (toImport.length === 0) {
-      // Everything was cached — move straight to the editor.
-      clearComponentSelection();
-      setScreen('slide-manager');
+  function confirm(components: ComponentInfo[]) {
+    if (components.length === 0) return;
+    const items = components.map(itemFromComponent);
+    const state = useSlideStore.getState();
+    if (intent.kind === 'change-layout') {
+      applyTemplates(items.slice(0, 1), { kind: 'change-layout', slideId: intent.slideId });
       return;
     }
-
-    // Kick off the blocking import job. App.tsx will create slides and
-    // transition to the editor when `import-complete` comes back.
-    const requestId = startImportJob(toImport);
-    penpotApi.importComponents(requestId, toImport);
+    if (intent.kind === 'new-deck' || !state.deck) {
+      const lib = libraries.find((l) => l.id === activeLibraryId);
+      state.newDeck('Untitled presentation', lib ? { id: lib.id, name: lib.name.replace(/ \(this file\)$/, '') } : undefined);
+      applyTemplates(items, { kind: 'add-slides', insertAfterSlideId: null });
+      return;
+    }
+    applyTemplates(items, { kind: 'add-slides', insertAfterSlideId: intent.afterSlideId });
   }
+
+  const ctaLabel =
+    intent.kind === 'change-layout'
+      ? 'Apply layout'
+      : intent.kind === 'add-slides' && deck
+        ? `Add ${selected.length} slide${selected.length !== 1 ? 's' : ''}`
+        : `Create with ${selected.length} slide${selected.length !== 1 ? 's' : ''}`;
 
   return (
     <div className="library-picker">
-      {/* Top bar */}
       <div className="picker-topbar">
-        <button className="btn-icon" onClick={() => setScreen('home')} title="Back">
+        <button className="btn-icon" onClick={goBack} title="Back">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M19 12H5M12 5l-7 7 7 7"/>
           </svg>
         </button>
-        <span className="title-s picker-title">Import from Library</span>
+        <span className="title-s picker-title">{title}</span>
       </div>
 
       <div className="picker-body">
-        {/* Left sidebar */}
         <div className="picker-sidebar">
-          {/* Library dropdown */}
           <select
             className="select"
             value={activeLibraryId ?? ''}
-            onChange={(e) => handleLibraryChange(e.target.value)}
+            onChange={(e) => setActiveLibraryId(e.target.value)}
             disabled={librariesLoading}
           >
             {libraries.length === 0 && <option value="">No libraries found</option>}
@@ -147,7 +115,6 @@ export default function LibraryPicker() {
             ))}
           </select>
 
-          {/* Search */}
           <div className="picker-search-wrap">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="picker-search-icon">
               <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
@@ -155,75 +122,76 @@ export default function LibraryPicker() {
             <input
               className="input picker-search"
               type="text"
-              placeholder="Search components..."
+              placeholder="Search layouts…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
 
-          {/* Add CTA */}
-          {selectedComponentIds.size > 0 && (
+          {slideCount > 0 && slideCount < all.length && (
+            <label className="picker-check body-xs">
+              <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
+              Show all components ({all.length})
+            </label>
+          )}
+
+          <p className="body-xs picker-hint">
+            {intent.kind === 'change-layout'
+              ? 'Your edited texts and images move to the matching places of the new layout.'
+              : 'Click to select, double-click to add one right away. Logos and icons are in the editor’s Insert tab.'}
+          </p>
+
+          {activeLibraryId && (
             <button
-              data-appearance="primary"
-              className="picker-add-btn"
-              onClick={handleAddSelected}
+              className="btn-link picker-refresh"
+              onClick={() => void requestThumbnails(activeLibraryId, true)}
+              disabled={thumbnailsPending.size > 0}
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
-              Add Selected ({selectedComponentIds.size})
+              {thumbnailsPending.size > 0 ? `Rendering previews (${thumbnailsPending.size})…` : 'Refresh previews'}
+            </button>
+          )}
+
+          {selected.length > 0 && (
+            <button data-appearance="primary" className="picker-add-btn" onClick={() => confirm(selected)}>
+              {ctaLabel}
             </button>
           )}
         </div>
 
-        {/* Right content */}
         <div className="picker-content">
-          {componentsLoading ? (
+          {catalogLoading && !catalog ? (
             <div className="picker-loading">
               <div className="spinner" />
               <span className="body-s">Loading components…</span>
             </div>
           ) : libraries.length === 0 ? (
             <div className="picker-empty">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.25">
-                <rect x="3" y="3" width="8" height="8" rx="1"/>
-                <rect x="13" y="3" width="8" height="8" rx="1"/>
-                <rect x="3" y="13" width="8" height="8" rx="1"/>
-                <rect x="13" y="13" width="8" height="8" rx="1"/>
-              </svg>
-              <p className="body-s">No connected libraries found.</p>
-              <p className="body-xs picker-empty-hint">Connect a shared library in Penpot to use components as slide templates.</p>
+              <p className="body-s">No libraries with components.</p>
+              <p className="body-xs picker-empty-hint">Connect a shared library from the home screen.</p>
             </div>
-          ) : filteredComponents.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <div className="picker-empty">
               <p className="body-s">No components match your search.</p>
-              <button
-                className="btn-link"
-                onClick={() => setSearchQuery('')}
-              >
-                Clear search
-              </button>
+              <button className="btn-link" onClick={() => setSearchQuery('')}>Clear search</button>
             </div>
           ) : (
             <div className="component-sections">
               {Object.entries(grouped).map(([section, comps]) => (
                 <div key={section} className="component-section">
                   <div className="component-section-header">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <rect x="3" y="3" width="8" height="8" rx="1"/>
-                      <rect x="13" y="3" width="8" height="8" rx="1"/>
-                      <rect x="3" y="13" width="8" height="8" rx="1"/>
-                    </svg>
                     <span className="headline-s" style={{ color: 'var(--foreground-secondary)' }}>{section}</span>
+                    <span className="body-xs component-section-count">{comps.length}</span>
                   </div>
                   <div className="component-grid">
                     {comps.map((comp) => (
                       <ComponentCard
                         key={comp.id}
                         component={comp}
-                        selected={selectedComponentIds.has(comp.id)}
-                        onToggle={() => toggleComponentSelection(comp.id, comp.libraryId)}
-                        isSuggested={isSlideLike(comp.name)}
+                        selected={selectedComponentIds.includes(comp.id)}
+                        order={selectedComponentIds.indexOf(comp.id)}
+                        showOrder={intent.kind !== 'change-layout' && selectedComponentIds.length > 1}
+                        onToggle={() => toggleComponentSelection(comp.id)}
+                        onQuickAdd={() => confirm([comp])}
                       />
                     ))}
                   </div>
@@ -242,40 +210,40 @@ export default function LibraryPicker() {
 interface ComponentCardProps {
   component: ComponentInfo;
   selected: boolean;
+  order: number;
+  showOrder: boolean;
   onToggle: () => void;
-  isSuggested: boolean;
+  onQuickAdd: () => void;
 }
 
-function ComponentCard({ component, selected, onToggle, isSuggested }: ComponentCardProps) {
+function ComponentCard({ component, selected, order, showOrder, onToggle, onQuickAdd }: ComponentCardProps) {
   const thumbnail = useSlideStore((s) => s.thumbnailsMap[component.id]);
   const isPending = useSlideStore((s) => s.thumbnailsPending.has(component.id));
   const initials = component.name
     .split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  const ratio = component.width && component.height ? component.width / component.height : 16 / 9;
 
   return (
     <button
       className={`component-card ${selected ? 'selected' : ''}`}
       onClick={onToggle}
-      title={component.name}
+      onDoubleClick={onQuickAdd}
+      title={`${component.name}${component.width ? ` — ${Math.round(component.width)}×${Math.round(component.height ?? 0)}` : ''}`}
     >
-      <div className="component-thumbnail">
+      <div className="component-thumbnail" style={{ aspectRatio: String(Math.min(2.4, Math.max(0.6, ratio))) }}>
         {selected && (
           <span className="component-check">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
+            {showOrder ? (
+              <span className="component-order">{order + 1}</span>
+            ) : (
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            )}
           </span>
         )}
-        {isSuggested && !selected && (
-          <span className="component-suggested" title="Looks like a slide template" />
-        )}
         {thumbnail ? (
-          <img
-            className="component-preview-img"
-            src={thumbnail}
-            alt={component.name}
-            draggable={false}
-          />
+          <img className="component-preview-img" src={thumbnail} alt={component.name} draggable={false} />
         ) : isPending ? (
           <div className="component-preview-loading">
             <div className="spinner spinner--sm" />
@@ -283,10 +251,6 @@ function ComponentCard({ component, selected, onToggle, isSuggested }: Component
         ) : (
           <div className="component-preview-placeholder">
             <span className="component-initials">{initials}</span>
-            <div className="component-preview-lines">
-              <div className="preview-line preview-line--wide" />
-              <div className="preview-line preview-line--narrow" />
-            </div>
           </div>
         )}
       </div>
@@ -295,19 +259,14 @@ function ComponentCard({ component, selected, onToggle, isSuggested }: Component
   );
 }
 
-// Natural collator so "Slide 2" sorts before "Slide 10" instead of after it
-// — plain string comparison would produce "Slide 1, Slide 10, Slide 2…".
+// Natural collator so "Slide 2" sorts before "Slide 10" instead of after it.
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function groupBySection(components: ComponentInfo[]): Record<string, ComponentInfo[]> {
   const groups: Record<string, ComponentInfo[]> = {};
   for (const comp of components) {
-    const section = comp.path ? comp.path.split('/')[0] : 'Components';
-    if (!groups[section]) groups[section] = [];
-    groups[section].push(comp);
-  }
-  if (Object.keys(groups).length === 0 && components.length > 0) {
-    groups['Components'] = components;
+    const section = comp.path || 'Components';
+    (groups[section] ??= []).push(comp);
   }
   for (const key of Object.keys(groups)) {
     groups[key].sort((a, b) => NAME_COLLATOR.compare(a.name, b.name));

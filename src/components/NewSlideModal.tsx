@@ -65,21 +65,30 @@ const PRESET_LAYOUTS: { id: PresetLayout; label: string; icon: React.ReactNode }
 ];
 
 const SIZE_OPTIONS: { id: SlideSizePreset; label: string }[] = [
-  { id: '16:9', label: '16:9 (Standard)' },
-  { id: '4:3', label: '4:3' },
+  { id: '16:9', label: '16:9 (1920×1080)' },
+  { id: '4:3', label: '4:3 (1440×1080)' },
   { id: 'custom', label: 'Custom' },
 ];
 
 export default function NewSlideModal() {
   const setShowNewSlideModal = useSlideStore((s) => s.setShowNewSlideModal);
-  const addSlide = useSlideStore((s) => s.addSlide);
+  const addSlides = useSlideStore((s) => s.addSlides);
+  const commitHistory = useSlideStore((s) => s.commitHistory);
   const slides = useSlideStore((s) => s.slides);
+  const activeSlideId = useSlideStore((s) => s.activeSlideId);
+  // New slides match the deck: the size of the current slide, if any.
+  const current = slides.find((s) => s.id === activeSlideId) ?? slides[0];
+  const initialPreset: SlideSizePreset = !current
+    ? '16:9'
+    : (Object.keys(SLIDE_SIZE_PRESETS) as SlideSizePreset[]).find(
+        (k) => k !== 'custom' && SLIDE_SIZE_PRESETS[k].width === current.width && SLIDE_SIZE_PRESETS[k].height === current.height
+      ) ?? 'custom';
 
-  const [selectedSize, setSelectedSize] = useState<SlideSizePreset>('16:9');
+  const [selectedSize, setSelectedSize] = useState<SlideSizePreset>(initialPreset);
   const [selectedLayout, setSelectedLayout] = useState<PresetLayout>('empty');
-  const [background, setBackground] = useState('#18181a');
-  const [customW, setCustomW] = useState(800);
-  const [customH, setCustomH] = useState(600);
+  const [background, setBackground] = useState(current?.background ?? '#18181a');
+  const [customW, setCustomW] = useState(current?.width ?? 1920);
+  const [customH, setCustomH] = useState(current?.height ?? 1080);
 
   const displaySize = selectedSize === 'custom'
     ? `${customW} × ${customH}`
@@ -93,7 +102,8 @@ export default function NewSlideModal() {
       selectedSize === 'custom' ? customW : undefined,
       selectedSize === 'custom' ? customH : undefined
     );
-    addSlide(slide);
+    commitHistory();
+    addSlides([slide], activeSlideId);
     setShowNewSlideModal(false);
   }
 
@@ -107,7 +117,7 @@ export default function NewSlideModal() {
               <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
             </svg>
           </span>
-          <span className="title-s">Create New Slide</span>
+          <span className="title-s">New blank slide</span>
           <button className="btn-icon modal-close" onClick={() => setShowNewSlideModal(false)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12"/>
@@ -161,13 +171,13 @@ export default function NewSlideModal() {
                       <label className="prop-label-sm">Width</label>
                       <input className="input" type="number" value={customW} min={100} max={4096}
                         style={{ paddingBlock: 'var(--spacing-4)' }}
-                        onChange={(e) => setCustomW(parseInt(e.target.value) || 800)} />
+                        onChange={(e) => setCustomW(parseInt(e.target.value) || 1920)} />
                     </div>
                     <div className="prop-field">
                       <label className="prop-label-sm">Height</label>
                       <input className="input" type="number" value={customH} min={100} max={4096}
                         style={{ paddingBlock: 'var(--spacing-4)' }}
-                        onChange={(e) => setCustomH(parseInt(e.target.value) || 600)} />
+                        onChange={(e) => setCustomH(parseInt(e.target.value) || 1080)} />
                     </div>
                   </div>
                 </div>

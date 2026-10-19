@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useSlideStore } from '../store';
+import { useElementSize } from '../hooks';
 import type { Slide, SlideNode } from '../types';
 import {
   makeRectNode,
@@ -8,9 +9,11 @@ import {
   fillsToCss,
   findNodeById,
   findNodeAbs,
-  cloneNodeWithNewIds,
   textNodeCss,
+  nodeBackground,
+  slideBackgroundCss,
 } from '../utils';
+import { cloneNodeWithNewIds } from '../deck';
 
 interface Props {
   slide: Slide | null;
@@ -18,9 +21,8 @@ interface Props {
 
 type Tool = 'select' | 'text' | 'rect' | 'ellipse';
 
-// The internal render size for the canvas editing area
-const CANVAS_MAX_WIDTH = 640;
-const CANVAS_MAX_HEIGHT = 400;
+// Breathing room around the slide inside the canvas area.
+const CANVAS_PADDING = 24;
 
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 8;
@@ -142,6 +144,7 @@ export default function SlideCanvas({ slide }: Props) {
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const wrapperSize = useElementSize(wrapperRef);
 
   // In-memory clipboard. Each entry is a deep-cloned node plus the absolute
   // slide position it should paste at — starts as the source's absolute
@@ -174,7 +177,8 @@ export default function SlideCanvas({ slide }: Props) {
           const found = findNodeAbs(slide.nodes, id);
           if (!found) continue;
           items.push({
-            node: cloneNodeWithNewIds(found.node),
+            // A copy is a new element, not the template slot it came from.
+            node: cloneNodeWithNewIds(found.node, false),
             absX: found.absX,
             absY: found.absY,
           });
@@ -217,7 +221,7 @@ export default function SlideCanvas({ slide }: Props) {
 
       const newIds: string[] = [];
       for (const item of clipboardRef.current) {
-        const fresh = cloneNodeWithNewIds(item.node);
+        const fresh = cloneNodeWithNewIds(item.node, false);
         fresh.x = item.absX + dx;
         fresh.y = item.absY + dy;
         addNode(slideId, fresh);
@@ -276,9 +280,10 @@ export default function SlideCanvas({ slide }: Props) {
   // falls back to a 1×1 slide while there is nothing to show.
   const slideWidth = slide?.width || 1;
   const slideHeight = slide?.height || 1;
-  const scaleX = CANVAS_MAX_WIDTH / slideWidth;
-  const scaleY = CANVAS_MAX_HEIGHT / slideHeight;
-  const fitScale = Math.min(scaleX, scaleY, 1);
+  // Fit the slide to the space the canvas area actually has.
+  const availW = Math.max(120, wrapperSize.width - CANVAS_PADDING * 2);
+  const availH = Math.max(80, wrapperSize.height - CANVAS_PADDING * 2);
+  const fitScale = Math.min(availW / slideWidth, availH / slideHeight, 1);
   // Final scale combines fit-to-viewport with the user zoom; all internal
   // drag/resize math divides by this, so coordinate conversions stay correct
   // at any zoom level.
@@ -409,7 +414,7 @@ export default function SlideCanvas({ slide }: Props) {
     } else if (activeTool === 'ellipse') {
       node = { ...makeEllipseNode(`Ellipse ${Date.now() % 1000}`, x, y, Math.min(w, h)), width: w, height: h };
     } else {
-      node = makeTextNode(x, y, Math.max(w, 120), Math.max(h, 40));
+      node = makeTextNode(x, y, Math.max(w, 120), Math.max(h, 40), slideWidth);
     }
     commitHistory();
     addNode(slideId, node);
@@ -612,7 +617,7 @@ export default function SlideCanvas({ slide }: Props) {
           style={{
             width: displayW,
             height: displayH,
-            background: fillsToCss(slide.backgroundFills) ?? slide.background,
+            background: slideBackgroundCss(slide),
             position: 'relative',
             overflow: 'hidden',
           }}
@@ -623,22 +628,7 @@ export default function SlideCanvas({ slide }: Props) {
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
 
-          {slide.nodesLoading ? (
-            slide.thumbnailUrl ? (
-              <img
-                src={slide.thumbnailUrl}
-                alt={slide.componentName ?? slide.name}
-                style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
-                draggable={false}
-              />
-            ) : (
-              <div className="canvas-component-overlay">
-                <div className="spinner" />
-                <p className="canvas-component-hint">Loading slide content…</p>
-              </div>
-            )
-          ) : (
-            slide.nodes.map((node) => (
+          {slide.nodes.map((node) => (
               <CanvasNode
                 key={node.id}
                 node={node}
@@ -660,8 +650,7 @@ export default function SlideCanvas({ slide }: Props) {
                 onResize={(id, patch) => updateNode(slide.id, id, patch)}
                 onCommitHistory={commitHistory}
               />
-            ))
-          )}
+            ))}
 
           {/* Drawing / marquee preview rect */}
           {canvasDragRect && canvasDragRect.w > 2 && canvasDragRect.h > 2 && (
@@ -683,6 +672,49 @@ export default function SlideCanvas({ slide }: Props) {
     </div>
   );
 }
+
+// ─── Static preview ───────────────────────────────────────────────────────────
+
+const noop = () => {};
+
+// Read-only rendering of a slide at a given width, with the exact renderer of
+// the editor (clipping, image fills, text styles) — used for slide thumbnails.
+export function SlidePreview({ slide, width }: { slide: Slide; width: number }) {
+  const scale = width / Math.max(1, slide.width);
+  return (
+    <div
+      className="slide-preview"
+      style={{
+        width,
+        height: slide.height * scale,
+        position: 'relative',
+        overflow: 'hidden',
+        background: slideBackgroundCss(slide),
+        pointerEvents: 'none',
+      }}
+    >
+      {slide.nodes.map((node) => (
+        <CanvasNode
+          key={node.id}
+          node={node}
+          scale={scale}
+          slideId={slide.id}
+          activeTool="select"
+          selectedNodeIds={EMPTY_IDS}
+          editingNodeId={null}
+          onNodeMouseDown={noop}
+          onStartEditing={noop}
+          onStopEditing={noop}
+          onTextChange={noop}
+          onResize={noop}
+          onCommitHistory={noop}
+        />
+      ))}
+    </div>
+  );
+}
+
+const EMPTY_IDS: string[] = [];
 
 // ─── Canvas Node (recursive) ──────────────────────────────────────────────────
 
@@ -761,8 +793,8 @@ function CanvasNode({
   // The clipping layer is a child div so the outer wrapper can host resize
   // handles outside the clipped area.
   if (node.type === 'group') {
-    const groupBg = node.clipContent
-      ? fillsToCss(node.fills) ?? node.fill ?? 'transparent'
+    const groupBg = node.clipContent || node.fills?.length
+      ? nodeBackground(node.fills, node.fill ?? 'transparent', node.imageUrl) ?? 'transparent'
       : 'transparent';
     return (
       <div
@@ -856,7 +888,7 @@ function CanvasNode({
           style={{
             width: '100%',
             height: '100%',
-            background: fillsToCss(node.fills) ?? node.fill ?? '#6457f0',
+            background: nodeBackground(node.fills, node.fill, node.imageUrl) ?? '#6457f0',
             borderRadius: node.borderRadius ? node.borderRadius * scale : 0,
             border: node.strokeColor ? `${(node.strokeWidth ?? 1) * scale}px solid ${node.strokeColor}` : undefined,
           }}
@@ -870,7 +902,7 @@ function CanvasNode({
           style={{
             width: '100%',
             height: '100%',
-            background: fillsToCss(node.fills) ?? node.fill ?? '#6457f0',
+            background: nodeBackground(node.fills, node.fill, node.imageUrl) ?? '#6457f0',
             borderRadius: '50%',
             border: node.strokeColor ? `${(node.strokeWidth ?? 1) * scale}px solid ${node.strokeColor}` : undefined,
           }}
@@ -888,7 +920,10 @@ function CanvasNode({
             style={{
               width: '100%',
               height: '100%',
-              objectFit: 'contain',
+              // A replaced picture fills its slot like an image fill does;
+              // rendered snapshots of vectors must not be cropped.
+              objectFit: node.imageReplaced ? 'cover' : 'contain',
+              borderRadius: node.borderRadius ? node.borderRadius * scale : undefined,
               pointerEvents: 'none',
               userSelect: 'none',
             }}

@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { useElementSize } from '../hooks';
 import { useSlideStore } from '../store';
 import type { Slide } from '../types';
-import { fillsToCss, textNodeCss } from '../utils';
+import { SlidePreview } from './SlideCanvas';
 
 export default function SlideList() {
   const slides = useSlideStore((s) => s.slides);
@@ -204,142 +205,12 @@ function SlideItem({
 
 // ─── Slide Thumbnail ──────────────────────────────────────────────────────────
 
-import type { SlideNode } from '../types';
-
-function flattenLeaves(
-  nodes: SlideNode[],
-  offsetX = 0,
-  offsetY = 0
-): Array<SlideNode & { absX: number; absY: number }> {
-  const out: Array<SlideNode & { absX: number; absY: number }> = [];
-  for (const n of nodes) {
-    if (!n.visible) continue;
-    const absX = offsetX + n.x;
-    const absY = offsetY + n.y;
-    if (n.type === 'group') {
-      // Emit a background rect for clipped groups whose fills resolve to
-      // something renderable (solid, gradient or multi-fill stack).
-      const hasFillsBg = n.clipContent && (fillsToCss(n.fills) ?? n.fill);
-      if (hasFillsBg) {
-        out.push({ ...n, absX, absY });
-      }
-      if (n.children && n.children.length > 0) {
-        out.push(...flattenLeaves(n.children, absX, absY));
-      }
-      continue;
-    }
-    out.push({ ...n, absX, absY });
-  }
-  return out;
-}
-
 function SlideThumbnail({ slide }: { slide: Slide }) {
-  const scale = 160 / slide.width;
-
-  const thumbContent = () => {
-    if (slide.nodesLoading) {
-      if (slide.thumbnailUrl) {
-        return (
-          <img
-            src={slide.thumbnailUrl}
-            alt={slide.name}
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            draggable={false}
-          />
-        );
-      }
-      return (
-        <div className="slide-thumb-component-label">
-          <div className="spinner spinner--sm" />
-        </div>
-      );
-    }
-
-    const leaves = flattenLeaves(slide.nodes);
-
-    return (
-      <div className="slide-thumb-inner" style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
-        {leaves.map((node) => {
-          const baseStyle: React.CSSProperties = {
-            position: 'absolute',
-            left: node.absX,
-            top: node.absY,
-            width: node.width,
-            height: node.height,
-            opacity: node.opacity,
-            transform: `rotate(${node.rotation}deg)`,
-          };
-
-          if (node.type === 'text') {
-            return (
-              <div
-                key={node.id}
-                className="slide-thumb-node"
-                style={{
-                  ...baseStyle,
-                  ...textNodeCss(node, 1),
-                  // baseStyle carries the box; textNodeCss assumes 100%.
-                  width: node.width,
-                  height: node.height,
-                }}
-              >
-                {node.text}
-              </div>
-            );
-          }
-
-          if (node.type === 'image' || node.type === 'path' || node.type === 'component-instance') {
-            if (node.imageUrl) {
-              return (
-                <img
-                  key={node.id}
-                  src={node.imageUrl}
-                  alt={node.name}
-                  draggable={false}
-                  style={{ ...baseStyle, objectFit: 'contain' }}
-                />
-              );
-            }
-            return (
-              <div
-                key={node.id}
-                className="slide-thumb-node"
-                style={{
-                  ...baseStyle,
-                  background: fillsToCss(node.fills) ?? node.fill ?? 'rgba(100,87,240,0.2)',
-                }}
-              />
-            );
-          }
-
-          const nodeBg = fillsToCss(node.fills) ?? node.fill ?? '#6457f0';
-          const stroke =
-            node.strokeColor && node.strokeWidth
-              ? `${node.strokeWidth}px solid ${node.strokeColor}`
-              : undefined;
-          return (
-            <div
-              key={node.id}
-              className="slide-thumb-node"
-              style={{
-                ...baseStyle,
-                background: nodeBg,
-                border: stroke,
-                borderRadius: node.type === 'ellipse' ? '50%' : (node.borderRadius ?? 0),
-              }}
-            />
-          );
-        })}
-      </div>
-    );
-  };
-
+  const ref = useRef<HTMLDivElement>(null);
+  const { width } = useElementSize(ref);
   return (
-    <div
-      className="slide-thumb"
-      style={{ background: fillsToCss(slide.backgroundFills) ?? slide.background }}
-    >
-      {thumbContent()}
+    <div ref={ref} className="slide-thumb" style={{ aspectRatio: `${slide.width} / ${slide.height}` }}>
+      {width > 0 && <SlidePreview slide={slide} width={width} />}
     </div>
   );
 }

@@ -6,13 +6,30 @@ import type {
   CopyStateEntry,
   ExportSettings,
   ImportItemRequest,
+  DeckSummary,
+  LibraryInfo,
+  ComponentInfo,
+  ComponentKind,
+  LibraryColorInfo,
+  LibraryTypographyInfo,
 } from './types';
-import type { Board, Fill, Shape, Stroke, Text } from '@penpot/plugin-types';
+import type {
+  Board,
+  Fill,
+  ImageData,
+  Library,
+  LibraryComponent,
+  LibraryTypography,
+  Shape,
+  Stroke,
+  Text,
+} from '@penpot/plugin-types';
 
-// Open the plugin UI at a comfortable size for a slide builder
+// Open the plugin UI at a comfortable size for a slide editor: slide list,
+// canvas, speaker notes and the design panel side by side.
 penpot.ui.open('Slide Builder', `?theme=${penpot.theme}`, {
-  width: 900,
-  height: 680,
+  width: 1040,
+  height: 720,
 });
 
 // ─── Message Handler ──────────────────────────────────────────────────────────
@@ -22,14 +39,38 @@ penpot.ui.onMessage<UIMessage>((message) => {
     case 'get-libraries':
       handleGetLibraries();
       break;
-    case 'get-components':
-      void handleGetComponents(message.requestId, message.libraryId, message.knownThumbnailIds);
+    case 'get-available-libraries':
+      void handleGetAvailableLibraries();
+      break;
+    case 'connect-library':
+      void handleConnectLibrary(message.libraryId);
+      break;
+    case 'get-catalog':
+      handleGetCatalog(message.requestId, message.libraryId);
+      break;
+    case 'get-thumbnails':
+      void handleGetThumbnails(message.requestId, message.libraryId, message.known, message.force);
       break;
     case 'import-components':
       void handleImportComponents(message.requestId, message.items);
       break;
+    case 'get-asset':
+      void handleGetAsset(message.requestId, message.libraryId, message.componentId);
+      break;
     case 'insert-into-canvas':
-      void handleInsertIntoCanvas(message.slides, message.settings);
+      void handleInsertIntoCanvas(message.deckId, message.deckName, message.slides, message.settings);
+      break;
+    case 'list-decks':
+      send({ type: 'decks', decks: readDeckIndex() });
+      break;
+    case 'load-deck':
+      handleLoadDeck(message.deckId);
+      break;
+    case 'save-deck':
+      handleSaveDeck(message.requestId, message.deck, message.summary);
+      break;
+    case 'delete-deck':
+      handleDeleteDeck(message.deckId);
       break;
     case 'resize':
       penpot.ui.resize(message.width, message.height);
@@ -43,10 +84,72 @@ penpot.on('themechange', (theme) => {
   send({ type: 'theme', theme });
 });
 
+// ─── Deck persistence ─────────────────────────────────────────────────────────
+// Decks live inside the Penpot file as shared plugin data, so they travel with
+// the file (and its collaborators) instead of dying with the plugin window.
+// The UI serialises the deck; the plugin only stores strings.
+
+const DATA_NS = 'slidebuilder';
+const DECK_INDEX_KEY = 'decks';
+const deckKey = (id: string) => `deck:${id}`;
+
+function readDeckIndex(): DeckSummary[] {
+  try {
+    const raw = penpot.currentFile?.getSharedPluginData(DATA_NS, DECK_INDEX_KEY);
+    const list = raw ? (JSON.parse(raw) as DeckSummary[]) : [];
+    return Array.isArray(list) ? list.sort((a, b) => b.updatedAt - a.updatedAt) : [];
+  } catch {
+    // A corrupt index must not lock the user out: start a fresh list.
+    return [];
+  }
+}
+
+function writeDeckIndex(list: DeckSummary[]) {
+  penpot.currentFile?.setSharedPluginData(DATA_NS, DECK_INDEX_KEY, JSON.stringify(list));
+}
+
+function handleLoadDeck(deckId: string) {
+  let deck: string | null = null;
+  try {
+    deck = penpot.currentFile?.getSharedPluginData(DATA_NS, deckKey(deckId)) || null;
+  } catch (err) {
+    sendError('Could not read the presentation: ' + stringifyErr(err));
+  }
+  send({ type: 'deck-loaded', deckId, deck });
+}
+
+function handleSaveDeck(requestId: string, deck: string, summary: DeckSummary) {
+  try {
+    const file = penpot.currentFile;
+    if (!file) throw new Error('No file is open.');
+    file.setSharedPluginData(DATA_NS, deckKey(summary.id), deck);
+    const list = readDeckIndex().filter((d) => d.id !== summary.id);
+    writeDeckIndex([summary, ...list]);
+    send({ type: 'deck-saved', requestId, deckId: summary.id, ok: true });
+  } catch (err) {
+    send({ type: 'deck-saved', requestId, deckId: summary.id, ok: false, message: stringifyErr(err) });
+  }
+}
+
+function handleDeleteDeck(deckId: string) {
+  try {
+    // Plugin data keys cannot be removed, only emptied (spike Q9).
+    penpot.currentFile?.setSharedPluginData(DATA_NS, deckKey(deckId), '');
+    writeDeckIndex(readDeckIndex().filter((d) => d.id !== deckId));
+  } catch (err) {
+    sendError('Could not delete the presentation: ' + stringifyErr(err));
+  }
+  send({ type: 'decks', decks: readDeckIndex() });
+}
+
 // ─── Library Handlers ─────────────────────────────────────────────────────────
 
 function allLibraries() {
   return [penpot.library.local, ...penpot.library.connected];
+}
+
+function findLibrary(libraryId: string | undefined) {
+  return allLibraries().find((l) => l.id === libraryId) ?? null;
 }
 
 function findLibraryComponent(libraryId: string | undefined, componentId: string | undefined) {
@@ -63,79 +166,159 @@ function findLibraryComponent(libraryId: string | undefined, componentId: string
   return null;
 }
 
+// Slide layouts are big boards with a screen-like aspect ratio; everything
+// else (logos, icons, bullets…) is offered as an insertable element.
+function classifyComponent(comp: LibraryComponent): { kind: ComponentKind; width?: number; height?: number } {
+  try {
+    const main = comp.mainInstance();
+    if (!main) return { kind: 'asset' };
+    const { width, height } = main;
+    const ratio = width / Math.max(1, height);
+    const hinted = /slide|layout|cover|plantilla|diapositiva/i.test(`${comp.path}/${comp.name}`);
+    const big = width >= 600 && height >= 300;
+    const screenLike = ratio >= 1.2 && ratio <= 2.4;
+    const isSlide = main.type === 'board' && big && (screenLike || hinted);
+    return { kind: isSlide ? 'slide' : 'asset', width, height };
+  } catch {
+    // The main instance may be unavailable (e.g. not loaded yet).
+    return { kind: 'asset' };
+  }
+}
+
 function handleGetLibraries() {
   try {
     const local = penpot.library.local;
-    const connected = penpot.library.connected;
-
     // `connected` can also list the file's own library — skip it, it is
     // already represented by `local`.
-    const connectedEnabled = connected.filter(
+    const connected = penpot.library.connected.filter(
       (lib) => lib.id !== local.id && lib.components.length > 0
     );
 
-    const libraries = [
-      {
-        id: local.id,
-        name: `${local.name} (Local)`,
-        numComponents: local.components.length,
-      },
-      ...connectedEnabled.map((lib) => ({
-        id: lib.id,
-        name: lib.name,
-        numComponents: lib.components.length,
-      })),
-    ].filter((lib) => lib.numComponents > 0);
+    const describe = (lib: Library, isLocal: boolean): LibraryInfo => ({
+      id: lib.id,
+      name: isLocal ? `${lib.name} (this file)` : lib.name,
+      numComponents: lib.components.length,
+      numSlides: lib.components.filter((c) => classifyComponent(c).kind === 'slide').length,
+      isLocal,
+    });
 
-    send({ type: 'libraries', libraries });
+    const libraries = [describe(local, true), ...connected.map((l) => describe(l, false))].filter(
+      (lib) => lib.numComponents > 0
+    );
+
+    send({
+      type: 'libraries',
+      libraries,
+      fileId: penpot.currentFile?.id ?? '',
+      fileName: penpot.currentFile?.name ?? '',
+    });
   } catch (err) {
     sendError('Failed to load libraries: ' + stringifyErr(err));
   }
 }
 
-// Thumbnails go through Penpot's exporter, which is server-side and slow
-// (seconds per component), so the job is cancellable: a newer request for any
-// library supersedes the running one.
-const THUMBNAIL_WIDTH = 320;
-const THUMBNAIL_CONCURRENCY = 3;
-let activeThumbnailRequest: string | null = null;
-
-async function handleGetComponents(requestId: string, libraryId: string, knownThumbnailIds: string[]) {
-  activeThumbnailRequest = requestId;
+async function handleGetAvailableLibraries() {
   try {
-    const lib = allLibraries().find((l) => l.id === libraryId);
+    const connected = new Set([penpot.library.local.id, ...penpot.library.connected.map((l) => l.id)]);
+    const available = await penpot.library.availableLibraries();
+    send({
+      type: 'available-libraries',
+      libraries: available
+        .filter((l) => !connected.has(l.id) && l.numComponents > 0)
+        .map((l) => ({ id: l.id, name: l.name, numComponents: l.numComponents })),
+    });
+  } catch (err) {
+    send({ type: 'available-libraries', libraries: [] });
+    sendError('Could not list the team libraries: ' + stringifyErr(err));
+  }
+}
+
+async function handleConnectLibrary(libraryId: string) {
+  try {
+    await penpot.library.connectLibrary(libraryId);
+    send({ type: 'library-connected', libraryId });
+    handleGetLibraries();
+  } catch (err) {
+    sendError('Could not connect the library: ' + stringifyErr(err));
+  }
+}
+
+function handleGetCatalog(requestId: string, libraryId: string) {
+  try {
+    const lib = findLibrary(libraryId);
     if (!lib) {
       sendError(`Library not found: ${libraryId}`);
       return;
     }
 
-    const components = lib.components.map((comp) => {
-      let width: number | undefined;
-      let height: number | undefined;
-      try {
-        const main = comp.mainInstance();
-        if (main) {
-          width = main.width;
-          height = main.height;
-        }
-      } catch {
-        // The main instance may be unavailable (e.g. not loaded yet); the
-        // card simply shows no size.
-      }
-      return { id: comp.id, libraryId, name: comp.name, path: comp.path ?? '', width, height };
-    });
+    const components: ComponentInfo[] = lib.components.map((comp) => ({
+      id: comp.id,
+      libraryId,
+      name: comp.name,
+      path: comp.path ?? '',
+      ...classifyComponent(comp),
+    }));
 
-    // Send the list immediately so the grid renders without waiting.
-    send({ type: 'components', requestId, libraryId, components });
+    const colors: LibraryColorInfo[] = lib.colors.map((c) => ({
+      id: c.id,
+      libraryId,
+      name: c.name,
+      path: c.path ?? '',
+      color: c.color,
+      opacity: c.opacity,
+      isFlat: !!c.color && !c.gradient && !c.image,
+    }));
 
-    const known = new Set(knownThumbnailIds);
-    const queue = lib.components.filter((c) => !known.has(c.id));
+    const typographies: LibraryTypographyInfo[] = lib.typographies.map((t) => ({
+      id: t.id,
+      libraryId,
+      name: t.name,
+      path: t.path ?? '',
+      fontId: t.fontId,
+      fontFamily: t.fontFamily,
+      fontVariantId: t.fontVariantId,
+      fontSize: parseFloat(t.fontSize) || 14,
+      fontWeight: String(t.fontWeight ?? '400'),
+      fontStyle: t.fontStyle === 'italic' ? 'italic' : 'normal',
+      lineHeight: typographyLineHeight(t),
+      letterSpacing: parseFloat(t.letterSpacing) || 0,
+      textTransform: typographyTransform(t),
+    }));
+
+    send({ type: 'catalog', requestId, catalog: { libraryId, components, colors, typographies } });
+  } catch (err) {
+    sendError('Failed to load components: ' + stringifyErr(err));
+  }
+}
+
+// Thumbnails go through Penpot's exporter, which is server-side and slow
+// (seconds per component), so the job is cancellable — a newer request
+// supersedes the running one — and signature-checked: the UI caches
+// thumbnails across sessions and only changed components are re-rendered.
+const THUMBNAIL_WIDTH = 320;
+const THUMBNAIL_CONCURRENCY = 3;
+let activeThumbnailRequest: string | null = null;
+
+async function handleGetThumbnails(
+  requestId: string,
+  libraryId: string,
+  known: Record<string, string>,
+  force: boolean
+) {
+  activeThumbnailRequest = requestId;
+  try {
+    const lib = findLibrary(libraryId);
+    if (!lib) return;
+
+    const queue = [...lib.components];
     const worker = async () => {
       while (queue.length > 0 && activeThumbnailRequest === requestId) {
         const comp = queue.shift()!;
         try {
           const main = comp.mainInstance();
           if (!main) continue;
+          const signature = componentSignature(main);
+          if (!force && known[comp.id] === signature) continue;
           const scale = Math.min(1, THUMBNAIL_WIDTH / Math.max(1, main.width));
           const bytes = await main.export({ type: 'png', scale });
           if (activeThumbnailRequest !== requestId) return;
@@ -144,6 +327,7 @@ async function handleGetComponents(requestId: string, libraryId: string, knownTh
             requestId,
             componentId: comp.id,
             thumbnail: `data:image/png;base64,${uint8ArrayToBase64(bytes)}`,
+            signature,
           });
         } catch {
           // No thumbnail for this component — the card falls back to a
@@ -152,12 +336,60 @@ async function handleGetComponents(requestId: string, libraryId: string, knownTh
       }
     };
     await Promise.all(Array.from({ length: THUMBNAIL_CONCURRENCY }, worker));
-
+  } finally {
     if (activeThumbnailRequest === requestId) {
       send({ type: 'thumbnails-complete', requestId });
     }
+  }
+}
+
+// Cheap content fingerprint of a main component: its client-side SVG markup
+// (~50 ms) plus size. Text is not part of the markup for shapes on other
+// pages, so pure text edits need a manual refresh.
+function componentSignature(main: Shape): string {
+  const markup = safeMarkup(main) ?? '';
+  return `${Math.round(main.width)}x${Math.round(main.height)}:${hashString(markup)}`;
+}
+
+function hashString(value: string): string {
+  // FNV-1a, 32 bit.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36) + value.length.toString(36);
+}
+
+// A library element (logo, icon…) as a single linked component-instance node.
+async function handleGetAsset(requestId: string, libraryId: string, componentId: string) {
+  try {
+    const found = findLibraryComponent(libraryId, componentId);
+    if (!found) throw new Error('Component not found in the library.');
+    const main = found.comp.mainInstance();
+    const raw = safeMarkup(main);
+    const svgMarkup = raw ? await inlineMedia(raw) : undefined;
+    const node: SlideNode = {
+      id: `${componentId}-asset`,
+      type: 'component-instance',
+      name: found.comp.name,
+      x: 0,
+      y: 0,
+      width: main.width,
+      height: main.height,
+      visible: true,
+      opacity: 1,
+      rotation: 0,
+      role: 'asset',
+      libraryId: found.lib.id,
+      componentId,
+      componentName: found.comp.name,
+      svgMarkup,
+      imageUrl: svgMarkup ? svgDataUrl(svgMarkup) : await safeExportPng(main, 1),
+    };
+    send({ type: 'asset', requestId, node });
   } catch (err) {
-    sendError('Failed to load components: ' + stringifyErr(err));
+    send({ type: 'asset', requestId, node: null, message: stringifyErr(err) });
   }
 }
 
@@ -219,17 +451,23 @@ async function handleImportComponents(requestId: string, items: ImportItemReques
 
     try {
       const result = await importSingleComponent(item);
+      const found = findLibraryComponent(item.libraryId, item.componentId);
       send({
         type: 'import-item',
         requestId,
-        componentId: item.componentId,
-        libraryId: item.libraryId,
-        componentName: item.componentName,
-        nodes: result.nodes,
-        background: result.background,
-        backgroundFills: result.backgroundFills,
-        width: result.width,
-        height: result.height,
+        payload: {
+          componentId: item.componentId,
+          libraryId: found?.lib.id ?? item.libraryId,
+          libraryName: found?.lib.name,
+          componentName: item.componentName,
+          path: found?.comp.path,
+          nodes: result.nodes,
+          background: result.background,
+          backgroundFills: result.backgroundFills,
+          backgroundImageUrl: result.backgroundImageUrl,
+          width: result.width,
+          height: result.height,
+        },
         warnings: result.warnings,
       });
       success++;
@@ -252,6 +490,7 @@ interface ImportResult {
   nodes: SlideNode[];
   background: string;
   backgroundFills?: unknown[];
+  backgroundImageUrl?: string;
   width: number;
   height: number;
   warnings: string[];
@@ -263,6 +502,8 @@ interface ImportContext {
   // are template content, not nested instances.
   rootComponentId: string;
   warnings: string[];
+  // Typographies of the template's library, to re-link matching text styles.
+  typographies: LibraryTypography[];
 }
 
 // Import a component by reading its main instance (cheap, read-only) or, if
@@ -273,7 +514,7 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
   if (!found) {
     throw new Error(`Component "${item.componentName}" not found in any available library.`);
   }
-  const { comp } = found;
+  const { comp, lib } = found;
   const errors: string[] = [];
 
   let main: Shape | null = null;
@@ -285,7 +526,7 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
 
   if (main) {
     try {
-      return await buildResultFromRoot(main, item);
+      return await buildResultFromRoot(main, item, lib);
     } catch (err) {
       errors.push(`read mainInstance tree: ${stringifyErr(err)}`);
     }
@@ -302,7 +543,7 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
       try {
         tempInstance.x = -100000;
         tempInstance.y = -100000;
-        return await buildResultFromRoot(tempInstance, item);
+        return await buildResultFromRoot(tempInstance, item, lib);
       } catch (err) {
         errors.push(`read temporary instance tree: ${stringifyErr(err)}`);
       }
@@ -351,14 +592,19 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
   throw new Error(errors.length > 0 ? errors.join(' · ') : 'Component could not be read from the library.');
 }
 
-async function buildResultFromRoot(root: Shape, item: ImportItemRequest): Promise<ImportResult> {
-  const ctx: ImportContext = { rootComponentId: item.componentId, warnings: [] };
+async function buildResultFromRoot(root: Shape, item: ImportItemRequest, lib: Library): Promise<ImportResult> {
+  const ctx: ImportContext = {
+    rootComponentId: item.componentId,
+    warnings: [],
+    typographies: [...lib.typographies],
+  };
   const width = root.width ?? item.width ?? 1280;
   const height = root.height ?? item.height ?? 720;
   const background = readBackground(root) ?? '#18181a';
   const backgroundFills = readFillsSnapshot(root);
+  const backgroundImageUrl = await imageFillDataUrl(Array.isArray(root.fills) ? root.fills : []);
   const nodes = await importRootShape(root, ctx);
-  return { nodes, background, backgroundFills, width, height, warnings: ctx.warnings };
+  return { nodes, background, backgroundFills, backgroundImageUrl, width, height, warnings: ctx.warnings };
 }
 
 // If the root is a container, its children become the slide's top-level
@@ -435,6 +681,7 @@ async function importShape(
     opacity: shape.opacity ?? 1,
     rotation,
     sourceType: shape.type,
+    slotId: slotIdOf(shape),
   };
 
   const fills = 'fills' in shape && Array.isArray(shape.fills) ? shape.fills : [];
@@ -442,6 +689,9 @@ async function importShape(
   const fillColor = firstFill?.fillColor;
   const fillOpacity = firstFill?.fillOpacity ?? 1;
   const fillsSnapshot = fills.length > 0 ? clonePlain(fills) : undefined;
+  // Image fills are opaque ids to the UI; read the bytes (client-side, a few
+  // ms) so the editor can show the actual picture.
+  const fillImageUrl = await imageFillDataUrl(fills);
 
   const strokes = 'strokes' in shape && Array.isArray(shape.strokes) ? shape.strokes : [];
   const firstStroke = strokes[0];
@@ -452,6 +702,7 @@ async function importShape(
   const componentRef = detectNestedInstance(shape, ctx.rootComponentId);
   if (componentRef) {
     const svgMarkup = safeMarkup(shape);
+    const preview = svgMarkup ? await inlineMedia(svgMarkup) : undefined;
     return {
       ...base,
       type: 'component-instance',
@@ -459,8 +710,9 @@ async function importShape(
       componentId: componentRef.componentId,
       componentName: componentRef.name,
       copyState: captureCopyState(shape),
+      copyBase: { width, height },
       svgMarkup,
-      imageUrl: svgMarkup ? svgDataUrl(svgMarkup) : await safeExportPng(shape, 0.5),
+      imageUrl: preview ? svgDataUrl(preview) : await safeExportPng(shape, 0.5),
     };
   }
 
@@ -479,6 +731,7 @@ async function importShape(
       type: 'group',
       clipContent: shape.clipContent,
       borderRadius: shape.borderRadius ?? 0,
+      imageUrl: fillImageUrl,
       fill: fillColor,
       fillOpacity,
       fills: fillsSnapshot,
@@ -488,14 +741,25 @@ async function importShape(
   }
 
   if (shape.type === 'text') {
-    return { ...base, type: 'text', ...readTextStyle(shape), fills: fillsSnapshot, strokes: strokesSnapshot };
+    const style = readTextStyle(shape);
+    const typography = matchTypography(style, ctx.typographies);
+    return {
+      ...base,
+      type: 'text',
+      ...style,
+      typographyId: typography?.id,
+      typographyLibraryId: typography?.libraryId,
+      fills: fillsSnapshot,
+      strokes: strokesSnapshot,
+    };
   }
 
   if (shape.type === 'ellipse') {
     return {
       ...base,
       type: 'ellipse',
-      fill: fillColor ?? '#6457f0',
+      imageUrl: fillImageUrl,
+      fill: fillColor ?? (fillImageUrl ? undefined : '#6457f0'),
       fillOpacity,
       strokeColor: firstStroke?.strokeColor,
       strokeWidth: firstStroke?.strokeWidth,
@@ -508,7 +772,8 @@ async function importShape(
     return {
       ...base,
       type: 'rect',
-      fill: fillColor ?? '#6457f0',
+      imageUrl: fillImageUrl,
+      fill: fillColor ?? (fillImageUrl ? undefined : '#6457f0'),
       fillOpacity,
       strokeColor: firstStroke?.strokeColor,
       strokeWidth: firstStroke?.strokeWidth,
@@ -535,20 +800,41 @@ async function importShape(
   // the only option when the vector carries an image fill: the markup then
   // points at an authenticated asset URL that createShapeFromSvg can't load.
   let svgMarkup = safeMarkup(shape);
-  if (svgMarkup && svgMarkup.includes('by-file-media-id')) svgMarkup = undefined;
+  // The rotated bounding box, for geometry that already has the rotation
+  // baked in (SVG markup, path data).
+  const rotatedBox = {
+    x: shape.bounds.x - parentX,
+    y: shape.bounds.y - parentY,
+    width: shape.bounds.width,
+    height: shape.bounds.height,
+    rotation: 0,
+  };
+  if (svgMarkup && hasMedia(svgMarkup)) {
+    // Image-filled vector: its image is not exposed in `fills`, only in the
+    // markup. Keep the path geometry plus that image as a real image fill,
+    // and inline the bytes for the editor preview (no server export).
+    const preview = await inlineMedia(svgMarkup);
+    const media = firstMedia(svgMarkup);
+    if (shape.type === 'path' && preview && media) {
+      return {
+        ...base,
+        ...(rotation ? rotatedBox : {}),
+        type: 'path',
+        pathData: shape.d,
+        imageUrl: svgDataUrl(preview),
+        fills: [{ fillOpacity: 1, fillImage: media }],
+        strokes: strokesSnapshot,
+      };
+    }
+    svgMarkup = undefined;
+    if (preview) {
+      return { ...base, ...(rotation ? rotatedBox : {}), type: 'path', imageUrl: svgDataUrl(preview), strokes: strokesSnapshot };
+    }
+  }
   // The markup already bakes the rotation in, so describe these nodes by
   // their rotated bounding box with rotation 0 — otherwise they would be
   // rotated twice (editor and export).
-  const bakedGeometry =
-    svgMarkup && rotation
-      ? {
-          x: shape.bounds.x - parentX,
-          y: shape.bounds.y - parentY,
-          width: shape.bounds.width,
-          height: shape.bounds.height,
-          rotation: 0,
-        }
-      : {};
+  const bakedGeometry = svgMarkup && rotation ? rotatedBox : {};
   return {
     ...base,
     ...bakedGeometry,
@@ -612,6 +898,51 @@ function readTextStyle(text: Text): Partial<SlideNode> {
     growType: text.growType,
     fontColor: firstFillColor ?? '#000000',
   };
+}
+
+// Slot id = the shape's counterpart in the template's main component. Reading
+// the main instance the shape *is* that counterpart; inside a copy (fallback
+// path) `componentRefShape()` points at it.
+function slotIdOf(shape: Shape): string {
+  try {
+    if (shape.isComponentCopyInstance()) {
+      const ref = shape.componentRefShape();
+      if (ref) return ref.id;
+    }
+  } catch {
+    // Component lookups can throw for shapes outside the current page.
+  }
+  return shape.id;
+}
+
+// A text whose style equals a library typography is treated as using it, so
+// export can re-apply the style and keep the library link. Every visible
+// property must match: a false positive would restyle the text.
+function matchTypography(style: Partial<SlideNode>, typographies: LibraryTypography[]): LibraryTypography | null {
+  const near = (a: number | undefined, b: number) => a != null && Math.abs(a - b) < 0.01;
+  return (
+    typographies.find(
+      (t) =>
+        t.fontId === style.fontId &&
+        near(style.fontSize, parseFloat(t.fontSize) || 0) &&
+        String(t.fontWeight) === style.fontWeight &&
+        (t.fontStyle ?? 'normal') === (style.fontStyle ?? 'normal') &&
+        near(style.lineHeight, typographyLineHeight(t)) &&
+        near(style.letterSpacing, parseFloat(t.letterSpacing) || 0) &&
+        typographyTransform(t) === style.textTransform
+    ) ?? null
+  );
+}
+
+// Library typographies report unset values as null / "none"; texts report
+// the effective defaults (1.2 line height, no transform).
+function typographyLineHeight(t: LibraryTypography): number {
+  return parseFloat(t.lineHeight) || 1.2;
+}
+
+function typographyTransform(t: LibraryTypography): SlideNode['textTransform'] {
+  const v = t.textTransform;
+  return v === 'uppercase' || v === 'lowercase' || v === 'capitalize' ? v : undefined;
 }
 
 // A nested instance is the head of a component copy whose component is not
@@ -683,6 +1014,89 @@ function svgDataUrl(svg: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+// ─── Media inlining ──────────────────────────────────────────────────────────
+// Markup references images by authenticated asset URLs that the plugin UI
+// cannot load. The bytes are reachable through `ImageData.data()`: a
+// throw-away rectangle gets an image fill with the media id and is read back
+// (~40 ms per image, cached for the session).
+
+const MEDIA_URL_RE = /https?:\/\/[^"'\s)]*\/assets\/by-file-media-id\/([0-9a-f-]{36})/g;
+const mediaCache = new Map<string, string | null>();
+
+function hasMedia(svg: string): boolean {
+  return svg.includes('by-file-media-id');
+}
+
+function firstMedia(svg: string): ImageData | null {
+  const m = /by-file-media-id\/([0-9a-f-]{36})/.exec(svg);
+  if (!m) return null;
+  const tag = new RegExp(`<image[^>]*${m[1]}[^>]*>`).exec(svg)?.[0] ?? '';
+  // Penpot only accepts integer image sizes in fills.
+  const num = (attr: string) =>
+    Math.max(1, Math.round(parseFloat(new RegExp(`\\b${attr}="([0-9.]+)"`).exec(tag)?.[1] ?? '') || 100));
+  return { id: m[1], width: num('width'), height: num('height'), mtype: 'image/png', keepAspectRatio: false } as unknown as ImageData;
+}
+
+function sniffMime(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+  if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+  if (bytes[0] === 0x52 && bytes[8] === 0x57) return 'image/webp';
+  if (bytes[0] === 0x3c) return 'image/svg+xml';
+  return 'image/png';
+}
+
+async function mediaDataUrl(id: string): Promise<string | null> {
+  if (mediaCache.has(id)) return mediaCache.get(id) ?? null;
+  let result: string | null = null;
+  let probe: Shape | null = null;
+  try {
+    probe = penpot.createRectangle();
+    probe.x = -100000;
+    probe.y = -100000;
+    probe.fills = [{ fillOpacity: 1, fillImage: { id, width: 1, height: 1, mtype: 'image/png', keepAspectRatio: false } as unknown as ImageData }];
+    const image = Array.isArray(probe.fills) ? probe.fills[0]?.fillImage : undefined;
+    if (image) {
+      const bytes = await image.data();
+      result = `data:${sniffMime(bytes)};base64,${uint8ArrayToBase64(bytes)}`;
+    }
+  } catch {
+    result = null;
+  } finally {
+    try {
+      probe?.remove();
+    } catch {
+      // Nothing else to clean up.
+    }
+  }
+  mediaCache.set(id, result);
+  return result;
+}
+
+// The markup with every asset URL replaced by a data URL, or undefined when
+// some image could not be read.
+async function inlineMedia(svg: string): Promise<string | undefined> {
+  if (!hasMedia(svg)) return svg;
+  const ids = [...new Set([...svg.matchAll(MEDIA_URL_RE)].map((m) => m[1]))];
+  const urls = new Map<string, string>();
+  for (const id of ids) {
+    const url = await mediaDataUrl(id);
+    if (!url) return undefined;
+    urls.set(id, url);
+  }
+  return svg.replace(MEDIA_URL_RE, (_match, id: string) => urls.get(id) ?? _match);
+}
+
+async function imageFillDataUrl(fills: Fill[]): Promise<string | undefined> {
+  const image = fills.find((f) => f.fillImage)?.fillImage;
+  if (!image) return undefined;
+  try {
+    const bytes = await image.data();
+    return `data:${image.mtype || 'image/png'};base64,${uint8ArrayToBase64(bytes)}`;
+  } catch {
+    return undefined;
+  }
+}
+
 // Server-side raster export — slow (seconds), used only as a fallback.
 async function safeExportPng(shape: Shape, scale: number): Promise<string | undefined> {
   try {
@@ -726,7 +1140,12 @@ function readFillsSnapshot(shape: Shape): unknown[] | undefined {
 
 const DECK_PADDING = 40;
 
-async function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings) {
+async function handleInsertIntoCanvas(
+  deckId: string,
+  deckName: string,
+  slides: Slide[],
+  settings: ExportSettings
+) {
   const warnings: string[] = [];
   try {
     if (slides.length === 0) {
@@ -736,7 +1155,7 @@ async function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings)
 
     if (settings.createNewPage) {
       const page = penpot.createPage();
-      page.name = settings.slidePrefix ? `${settings.slidePrefix}s` : 'Slides';
+      page.name = deckName || 'Slides';
       // Shape creation always targets the active page.
       await penpot.openPage(page);
     }
@@ -760,6 +1179,7 @@ async function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings)
       const slide = slides[i];
       const name = `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
       const board = createBoardForSlide(slide, name);
+      tagBoard(board, deckId, slide);
 
       if (deck) {
         // Flex assigns the real position; keep each slide at its own size.
@@ -780,6 +1200,20 @@ async function handleInsertIntoCanvas(slides: Slide[], settings: ExportSettings)
         warnings.push(`${name}: ${stringifyErr(err)}`);
       }
       boards.push(board);
+    }
+
+    if (settings.createFlow && !deck && boards.length > 0) {
+      try {
+        const page = penpot.currentPage;
+        if (page) {
+          const flowName = deckName || 'Presentation';
+          // Re-inserting the same deck replaces its flow instead of piling up.
+          page.flows.filter((f) => f.name === flowName).forEach((f) => page.removeFlow(f));
+          page.createFlow(flowName, boards[0]);
+        }
+      } catch (err) {
+        warnings.push(`Could not create the presentation flow: ${stringifyErr(err)}`);
+      }
     }
 
     try {
@@ -822,6 +1256,21 @@ function createDeck(totalWidth: number, maxHeight: number, gap: number, center: 
   return deck;
 }
 
+// Inserted boards remember which deck/slide they come from (groundwork for
+// updating them in place) and carry the speaker notes.
+function tagBoard(board: Board, deckId: string, slide: Slide) {
+  try {
+    board.setSharedPluginData(
+      DATA_NS,
+      'slide',
+      JSON.stringify({ deckId, slideId: slide.id, componentId: slide.template?.componentId ?? null })
+    );
+    if (slide.notes) board.setSharedPluginData(DATA_NS, 'notes', slide.notes);
+  } catch {
+    // Tags are an optional extra; the slide itself is already inserted.
+  }
+}
+
 function createBoardForSlide(slide: Slide, name: string): Board {
   const board = penpot.createBoard();
   board.name = name;
@@ -839,8 +1288,8 @@ function createBoardForSlide(slide: Slide, name: string): Board {
 
 async function populateSlide(board: Board, slide: Slide, warnings: string[]) {
   // Library slide without extracted nodes: drop in a linked instance.
-  if (slide.source === 'library-component' && slide.nodes.length === 0) {
-    const found = findLibraryComponent(slide.libraryId, slide.componentId);
+  if (slide.template && slide.nodes.length === 0) {
+    const found = findLibraryComponent(slide.template.libraryId, slide.template.componentId);
     if (!found) {
       warnings.push(`"${slide.name}": template component not found — the slide is empty.`);
       return;
@@ -899,6 +1348,7 @@ async function createShapeForNode(
         inner.clipContent = node.clipContent ?? false;
         if (node.borderRadius) inner.borderRadius = node.borderRadius;
         inner.fills = node.fills && node.fills.length > 0 ? (clonePlain(node.fills) as Fill[]) : [];
+        if (node.imageReplaced) inner.fills = await withReplacedImage(inner.fills as Fill[], node);
         if (node.strokes?.length) inner.strokes = clonePlain(node.strokes) as Stroke[];
         await populateNodes(inner, node.children ?? [], absX, absY, warnings);
         return inner;
@@ -930,6 +1380,7 @@ async function createShapeForNode(
       rect.name = node.name;
       parent.appendChild(rect);
       applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
+      if (node.imageReplaced) rect.fills = await withReplacedImage(rect.fills as Fill[], node);
       if (node.borderRadius) rect.borderRadius = node.borderRadius;
       place(rect, node, absX, absY);
       return rect;
@@ -940,6 +1391,7 @@ async function createShapeForNode(
       ellipse.name = node.name;
       parent.appendChild(ellipse);
       applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
+      if (node.imageReplaced) ellipse.fills = await withReplacedImage(ellipse.fills as Fill[], node);
       place(ellipse, node, absX, absY);
       return ellipse;
     }
@@ -950,8 +1402,19 @@ async function createShapeForNode(
         const instance = found.comp.instance();
         instance.name = node.name;
         parent.appendChild(instance);
-        place(instance, node, absX, absY);
-        if (node.copyState) replayCopyState(instance, node.copyState, node.name, warnings);
+        instance.x = absX;
+        instance.y = absY;
+        // The copy state was captured at the template's instance size; replay
+        // it there, then scale everything to the size set in the editor.
+        const baseW = node.copyBase?.width ?? instance.width;
+        const baseH = node.copyBase?.height ?? instance.height;
+        if (node.copyState) {
+          instance.resize(Math.max(0.01, baseW), Math.max(0.01, baseH));
+          replayCopyState(instance, node.copyState, node.name, warnings);
+        }
+        scaleInstanceTo(instance, node.width, node.height);
+        instance.opacity = node.opacity;
+        if (node.rotation) instance.rotation = node.rotation;
         return instance;
       }
       warnings.push(`Component "${node.componentName ?? node.name}" not found — inserted a detached copy.`);
@@ -1004,6 +1467,32 @@ function replayCopyState(instance: Shape, state: CopyStateEntry[], name: string,
   });
 }
 
+// Resize a component copy *with* its content: `resize()` on the root alone
+// leaves the children at their size (constraints are left/top).
+function scaleInstanceTo(instance: Shape, width: number, height: number) {
+  const sx = width / Math.max(0.01, instance.width);
+  const sy = height / Math.max(0.01, instance.height);
+  if (Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001) return;
+  const originX = instance.x;
+  const originY = instance.y;
+  const descendants: { shape: Shape; dx: number; dy: number; w: number; h: number }[] = [];
+  const visit = (parent: Shape) => {
+    for (const child of readChildren(parent)) {
+      if (!child.rotation) {
+        descendants.push({ shape: child, dx: child.x - originX, dy: child.y - originY, w: child.width, h: child.height });
+      }
+      visit(child);
+    }
+  };
+  visit(instance);
+  instance.resize(Math.max(0.01, width), Math.max(0.01, height));
+  for (const d of descendants) {
+    d.shape.resize(Math.max(0.01, d.w * sx), Math.max(0.01, d.h * sy));
+    d.shape.x = originX + d.dx * sx;
+    d.shape.y = originY + d.dy * sy;
+  }
+}
+
 // Vectors are rebuilt from their SVG source; raster-only nodes become a
 // rectangle with an image fill (uploaded from the snapshot if needed).
 async function createVectorOrImage(
@@ -1013,7 +1502,20 @@ async function createVectorOrImage(
   absY: number,
   warnings: string[]
 ): Promise<Shape | null> {
-  if (node.svgMarkup) {
+  if (node.pathData) {
+    const path = penpot.createPath();
+    path.name = node.name;
+    parent.appendChild(path);
+    path.d = node.pathData;
+    const fills = clonePlain((node.fills ?? []) as Fill[]);
+    path.fills = node.imageReplaced ? await withReplacedImage(fills, node) : fills;
+    // New paths come with a default black stroke; always set the real ones.
+    path.strokes = clonePlain((node.strokes ?? []) as Stroke[]);
+    place(path, node, absX, absY);
+    return path;
+  }
+
+  if (node.svgMarkup && !node.imageReplaced && !hasMedia(node.svgMarkup)) {
     const vector = penpot.createShapeFromSvg(node.svgMarkup);
     if (vector) {
       vector.name = node.name;
@@ -1031,14 +1533,12 @@ async function createVectorOrImage(
   parent.appendChild(rect);
 
   const hasImageFill = (node.fills ?? []).some((f) => (f as { fillImage?: unknown }).fillImage);
-  if (hasImageFill) {
+  if (hasImageFill && !node.imageReplaced) {
     rect.fills = clonePlain(node.fills) as Fill[];
   } else if (node.imageUrl) {
-    const match = /^data:([^;]+);base64,(.*)$/.exec(node.imageUrl);
-    if (match) {
-      const image = await penpot.uploadMediaData(node.name, base64ToUint8Array(match[2]), match[1]);
-      rect.fills = [{ fillOpacity: 1, fillImage: image }];
-    }
+    const image = await uploadDataUrl(node.name, node.imageUrl);
+    if (image) rect.fills = [{ fillOpacity: 1, fillImage: image }];
+    if (node.borderRadius) rect.borderRadius = node.borderRadius;
   } else {
     warnings.push(`"${node.name}" has no visual source — inserted an empty placeholder.`);
     rect.fills = [];
@@ -1046,6 +1546,27 @@ async function createVectorOrImage(
   if (node.strokes?.length) rect.strokes = clonePlain(node.strokes) as Stroke[];
   place(rect, node, absX, absY);
   return rect;
+}
+
+async function uploadDataUrl(name: string, dataUrl: string) {
+  const match = /^data:([^;,]+)(;base64)?,(.*)$/.exec(dataUrl);
+  if (!match) return null;
+  const bytes = match[2]
+    ? base64ToUint8Array(match[3])
+    : new Uint8Array([...decodeURIComponent(match[3])].map((c) => c.charCodeAt(0) & 0xff));
+  return penpot.uploadMediaData(name, bytes, match[1]);
+}
+
+// Swap the template's image fill for the picture chosen in the editor,
+// keeping every other fill (overlays, tints) of the stack.
+async function withReplacedImage(fills: Fill[], node: SlideNode): Promise<Fill[]> {
+  if (!node.imageUrl) return fills;
+  const image = await uploadDataUrl(node.name, node.imageUrl);
+  if (!image) return fills;
+  const replacement: Fill = { fillOpacity: 1, fillImage: image };
+  const idx = fills.findIndex((f) => f.fillImage);
+  if (idx === -1) return [...fills, replacement];
+  return fills.map((f, i) => (i === idx ? { ...replacement, fillOpacity: f.fillOpacity ?? 1 } : f));
 }
 
 // Geometry order matters: size and position describe the unrotated box, and
@@ -1061,6 +1582,24 @@ function place(shape: Shape, node: SlideNode, absX: number, absY: number) {
 // Font resolution goes through penpot.fonts so Penpot gets a real fontId and
 // variant; setting `fontFamily` alone leaves Penpot guessing.
 function applyTextStyle(text: Text, node: SlideNode, warnings: string[]) {
+  // Library text style: applying it keeps the link to the typography.
+  if (node.typographyId) {
+    const lib = findLibrary(node.typographyLibraryId);
+    const typography =
+      lib?.typographies.find((t) => t.id === node.typographyId) ??
+      allLibraries()
+        .flatMap((l) => l.typographies)
+        .find((t) => t.id === node.typographyId);
+    if (typography) {
+      text.applyTypography(typography);
+      if (node.textAlign) text.align = node.textAlign;
+      if (node.verticalAlign) text.verticalAlign = node.verticalAlign;
+      if (node.textDecoration) text.textDecoration = node.textDecoration;
+      return;
+    }
+    warnings.push(`Text style for "${node.name}" is no longer in the library — kept its values unlinked.`);
+  }
+
   const font =
     (node.fontId ? penpot.fonts.findById(node.fontId) : null) ??
     (node.fontFamily ? penpot.fonts.findByName(node.fontFamily) : null);
