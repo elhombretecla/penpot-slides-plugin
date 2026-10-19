@@ -1,5 +1,7 @@
 # Slide Builder for Penpot
 
+<img width="1497" height="888" alt="A slide editor that lives inside Penpot" src="https://github.com/user-attachments/assets/6db94041-a01e-4c39-ae7d-a14c1d4b970b" />
+
 A slide editor that lives inside Penpot. Build presentations from your own
 template library, edit them like in Google Slides, see them exactly as
 Penpot renders them, and insert them into the file as linked boards that
