@@ -767,7 +767,7 @@ function NumberInput({
         min={min}
         max={max}
         step={step}
-        style={{ textAlign: 'right', paddingRight: suffix ? 'var(--spacing-20)' : undefined, paddingBlock: 'var(--spacing-4)' }}
+        style={suffix ? { paddingRight: 'var(--spacing-20)' } : undefined}
         onChange={(e) => {
           setDraft(e.target.value);
           const v = parseFloat(e.target.value);

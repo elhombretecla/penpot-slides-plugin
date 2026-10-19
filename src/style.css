@@ -1028,9 +1028,20 @@ button {
   width: 100%;
 }
 .prop-number-wrap .input {
-  text-align: right;
-  padding-right: var(--spacing-20) !important;
+  text-align: left;
   padding-block: var(--spacing-4) !important;
+}
+
+/* Numbers read like Penpot's own fields: no native spin buttons (arrow keys
+   still step the value). */
+input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 .prop-number-suffix {
   position: absolute;
