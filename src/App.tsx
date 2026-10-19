@@ -15,6 +15,7 @@ import SlideManager from './screens/SlideManager';
 import NewSlideModal from './components/NewSlideModal';
 import ImportProgressOverlay from './components/ImportProgressOverlay';
 import Notices from './components/Notices';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Gallery cards are small: embedded pictures are downscaled to this size.
 const THUMBNAIL_IMAGE_MAX = 480;
@@ -246,10 +247,12 @@ export default function App() {
 
   return (
     <div className="app-root">
-      {screen === 'home' && <HomeScreen />}
-      {screen === 'library-picker' && <LibraryPicker />}
-      {screen === 'slide-manager' && <SlideManager />}
-      {showNewSlideModal && <NewSlideModal />}
+      <ErrorBoundary>
+        {screen === 'home' && <HomeScreen />}
+        {screen === 'library-picker' && <LibraryPicker />}
+        {screen === 'slide-manager' && <SlideManager />}
+        {showNewSlideModal && <NewSlideModal />}
+      </ErrorBoundary>
       <ImportProgressOverlay />
       <Notices />
     </div>

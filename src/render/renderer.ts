@@ -24,8 +24,6 @@ const MEMORY_LIMIT = 80;
 const RENDER_IMAGE_MAX = 1600;
 const PREF_KEY = 'slide-builder:penpot-render';
 
-export type RenderStatus = 'off' | 'idle' | 'rendering' | 'error';
-
 interface RenderState {
   enabled: boolean;
   // Latest render per slide id (may be older than the slide's content).

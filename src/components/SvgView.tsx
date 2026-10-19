@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef } from 'react';
-import { loadSvgFonts, scopeSvgIds } from '../render/svg';
+import { loadSvgFonts, sanitizeSvg, scopeSvgIds } from '../render/svg';
 
 interface Props {
   svg: string;
@@ -13,7 +13,9 @@ interface Props {
 // it changes; hiding nodes just toggles their display.
 export default function SvgView({ svg, hiddenNodes, className, style }: Props) {
   const scope = 'r' + useId().replace(/[^a-zA-Z0-9_-]/g, '');
-  const html = useMemo(() => ({ __html: scopeSvgIds(svg, scope) }), [svg, scope]);
+  // Sanitised again here, the only place markup becomes DOM: cached renders
+  // may come from older versions of the plugin.
+  const html = useMemo(() => ({ __html: scopeSvgIds(sanitizeSvg(svg), scope) }), [svg, scope]);
   const ref = useRef<HTMLDivElement>(null);
   const hiddenKey = (hiddenNodes ?? []).join(',');
 

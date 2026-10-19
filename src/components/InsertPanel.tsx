@@ -101,6 +101,7 @@ export default function InsertPanel({ slide }: Props) {
         <div className="prop-section-header">LIBRARY ELEMENTS</div>
         <select
           className="select"
+          aria-label="Library"
           value={libraryId ?? ''}
           onChange={(e) => setLibraryId(e.target.value)}
           style={{ blockSize: '28px', fontSize: 'var(--font-size-xs)' }}

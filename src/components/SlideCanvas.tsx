@@ -509,7 +509,7 @@ export default function SlideCanvas({ slide }: Props) {
           </svg>
         </button>
         <div className="toolbar-divider" />
-        <ToolButton tool="select" active={activeTool === 'select'} onClick={() => setActiveTool('select')}>
+        <ToolButton tool="select" active={activeTool === 'select'} onClick={() => setActiveTool('select')} title="Select (V)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M5 3l14 9-7 1-4 7L5 3z"/>
           </svg>

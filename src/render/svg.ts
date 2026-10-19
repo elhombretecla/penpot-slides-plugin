@@ -3,13 +3,18 @@ import { ensureFontLoaded } from '../utils';
 // Helpers to display Penpot markup inline. Inline (not <img>) so the SVG
 // uses the fonts loaded in the document, like the editor's HTML text.
 
-const ATTR_EVENT_RE = /\s on[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi;
+// The markup is Penpot's own rendering, but it carries user content and is
+// inserted as live DOM: drop active elements, event handlers and script
+// URLs. Attributes are only touched inside tags, never in text content.
+const ACTIVE_ELEMENT_RE = /<(script|iframe|object|embed)\b[\s\S]*?(?:<\/\1\s*>|\/>)/gi;
+const TAG_RE = /<[A-Za-z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g;
+const EVENT_ATTR_RE = /\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
+const SCRIPT_URL_RE = /((?:xlink:)?href\s*=\s*["'])\s*javascript:[^"']*/gi;
 
 export function sanitizeSvg(svg: string): string {
   return svg
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(ATTR_EVENT_RE, '')
-    .replace(/(href\s*=\s*["'])\s*javascript:[^"']*/gi, '$1#');
+    .replace(ACTIVE_ELEMENT_RE, '')
+    .replace(TAG_RE, (tag) => tag.replace(EVENT_ATTR_RE, '').replace(SCRIPT_URL_RE, '$1#'));
 }
 
 // Tag the group of each top-level shape with the node it was built from.

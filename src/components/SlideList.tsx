@@ -252,6 +252,7 @@ function SlideItem({
       {isActive && (
         <input
           className="slide-name-input"
+          aria-label="Slide name"
           value={slide.name}
           onChange={(e) => {
             commitHistoryCoalesced(`slide:${slide.id}:name`);

@@ -20,4 +20,19 @@ export default tseslint.config(
       'no-empty': ['error', { allowEmptyCatch: false }],
     },
   },
+  ...[
+    // Penpot runs plugin.js as a classic script: the plugin bundle must be
+    // self-contained. Sharing a runtime module with the UI makes Rollup emit
+    // a shared chunk and an `import` statement. Types are fine.
+    { files: ['src/plugin.ts'], forbidden: '^\\./(?!plugin/|types$)' },
+    { files: ['src/plugin/**/*.ts'], forbidden: '^\\.\\./(?!types$)' },
+  ].map(({ files, forbidden }) => ({
+    files,
+    ignores: ['src/**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        patterns: [{ regex: forbidden, allowTypeImports: true, message: 'The plugin bundle must not share runtime code with the UI.' }],
+      }],
+    },
+  })),
 );

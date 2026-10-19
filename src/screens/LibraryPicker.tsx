@@ -106,6 +106,7 @@ export default function LibraryPicker() {
         <div className="picker-sidebar">
           <select
             className="select"
+            aria-label="Library"
             value={activeLibraryId ?? ''}
             onChange={(e) => setActiveLibraryId(e.target.value)}
             disabled={librariesLoading}

@@ -121,6 +121,7 @@ export default function ExportPanel() {
             max={2000}
             style={{ background: 'transparent', border: 'none', outline: 'none', paddingBlock: 0, flex: 1 }}
             onChange={(e) => setExportSettings({ spacing: parseInt(e.target.value) || 0 })}
+            aria-label="Spacing between boards (px)"
           />
         </div>
 
@@ -144,6 +145,7 @@ export default function ExportPanel() {
             title={updating ? 'Updating keeps the current arrangement' : undefined}
             role="switch"
             aria-checked={exportSettings.wrapInDeck}
+            aria-label="Wrap slides in a deck board"
           >
             <span className="toggle-thumb" />
           </button>
@@ -165,6 +167,7 @@ export default function ExportPanel() {
             title={exportSettings.wrapInDeck ? 'Flows need top-level boards: turn off the deck board' : undefined}
             role="switch"
             aria-checked={exportSettings.createFlow && !exportSettings.wrapInDeck}
+            aria-label="Create presentation flow"
           >
             <span className="toggle-thumb" />
           </button>
@@ -190,6 +193,7 @@ export default function ExportPanel() {
             title={updating ? 'Updating keeps the slides on their page' : undefined}
             role="switch"
             aria-checked={exportSettings.createNewPage}
+            aria-label="Create new page"
           >
             <span className="toggle-thumb" />
           </button>

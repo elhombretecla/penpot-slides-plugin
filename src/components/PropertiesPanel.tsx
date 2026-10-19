@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSlideStore } from '../store';
 import type { ColorTokenInfo, LibraryColorInfo, LibraryTypographyInfo, Slide, SlideNode } from '../types';
 import {
@@ -437,25 +437,21 @@ function NodeProperties({
           </PropRow>
 
           <div className="prop-row-2col">
-            <div className="prop-field">
-              <label className="prop-label-sm">Size</label>
+            <Field label="Size">
               <NumberInput value={node.fontSize ?? 16} min={4} max={1000} onChange={(v) => onUpdate({ fontSize: v })} />
-            </div>
-            <div className="prop-field">
-              <label className="prop-label-sm">Weight</label>
+            </Field>
+            <Field label="Weight">
               <WeightSelect node={node} onUpdate={onUpdate} />
-            </div>
+            </Field>
           </div>
 
           <div className="prop-row-2col">
-            <div className="prop-field">
-              <label className="prop-label-sm">Line height</label>
+            <Field label="Line height">
               <NumberInput value={node.lineHeight ?? 1.2} min={0.5} max={5} step={0.05} onChange={(v) => onUpdate({ lineHeight: v })} />
-            </div>
-            <div className="prop-field">
-              <label className="prop-label-sm">Letter spacing</label>
+            </Field>
+            <Field label="Letter spacing">
               <NumberInput value={node.letterSpacing ?? 0} min={-50} max={200} step={0.5} onChange={(v) => onUpdate({ letterSpacing: v })} />
-            </div>
+            </Field>
           </div>
 
           <PropRow label="Color">
@@ -517,24 +513,20 @@ function NodeProperties({
 
       <Accordion title="TRANSFORM" open={showTransform} onToggle={() => setShowTransform((v) => !v)}>
         <div className="prop-row-2col">
-          <div className="prop-field">
-            <label className="prop-label-sm">X</label>
+          <Field label="X">
             <NumberInput value={Math.round(node.x)} onChange={(v) => onUpdate({ x: v })} />
-          </div>
-          <div className="prop-field">
-            <label className="prop-label-sm">Y</label>
+          </Field>
+          <Field label="Y">
             <NumberInput value={Math.round(node.y)} onChange={(v) => onUpdate({ y: v })} />
-          </div>
+          </Field>
         </div>
         <div className="prop-row-2col">
-          <div className="prop-field">
-            <label className="prop-label-sm">W</label>
+          <Field label="W">
             <NumberInput value={Math.round(node.width)} min={1} onChange={(v) => onUpdate({ width: v })} />
-          </div>
-          <div className="prop-field">
-            <label className="prop-label-sm">H</label>
+          </Field>
+          <Field label="H">
             <NumberInput value={Math.round(node.height)} min={1} onChange={(v) => onUpdate({ height: v })} />
-          </div>
+          </Field>
         </div>
         <PropRow label="Rotation">
           <NumberInput value={node.rotation} min={-360} max={360} suffix="°" onChange={(v) => onUpdate({ rotation: v })} />
@@ -721,11 +713,39 @@ function Accordion({
   );
 }
 
+// The visible label names every control of its row for assistive tech
+// (fields, selects, color pickers… whatever the row contains).
+function useLabelledControls(ref: React.RefObject<HTMLElement | null>, labelId: string) {
+  useLayoutEffect(() => {
+    ref.current?.querySelectorAll('input, select, textarea, button').forEach((el) => {
+      if (el.hasAttribute('aria-label') || el.hasAttribute('title')) return;
+      if (el.tagName === 'BUTTON' && el.textContent?.trim()) return;
+      el.setAttribute('aria-labelledby', labelId);
+    });
+  });
+}
+
 function PropRow({ label, children }: { label: string; children: React.ReactNode }) {
+  const id = useId();
+  const ref = useRef<HTMLDivElement>(null);
+  useLabelledControls(ref, id);
   return (
     <div className="prop-row">
-      <label className="prop-label">{label}</label>
-      <div className="prop-control">{children}</div>
+      <label className="prop-label" id={id}>{label}</label>
+      <div className="prop-control" ref={ref}>{children}</div>
+    </div>
+  );
+}
+
+// A labelled field inside a two-column row (X / Y, size / weight…).
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  const id = useId();
+  const ref = useRef<HTMLDivElement>(null);
+  useLabelledControls(ref, id);
+  return (
+    <div className="prop-field" ref={ref}>
+      <label className="prop-label-sm" id={id}>{label}</label>
+      {children}
     </div>
   );
 }

@@ -2348,3 +2348,25 @@ button {
 .presenter-btn:disabled { opacity: 0.3; cursor: default; }
 .presenter-count { min-width: 56px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
 .presenter-sep { width: 1px; height: 18px; margin: 0 4px; background: rgba(255, 255, 255, 0.2); }
+
+/* ─── ERROR SCREEN ────────────────────────────────────────────────────────── */
+
+.error-screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-8);
+  padding: var(--spacing-24, 24px);
+  text-align: center;
+  background: var(--background-primary);
+  color: var(--foreground-primary);
+}
+.error-screen-message {
+  max-width: 520px;
+  color: var(--error-500);
+  word-break: break-word;
+}
+.error-screen-hint { color: var(--foreground-secondary); }
+.error-screen-actions { display: flex; gap: var(--spacing-8); margin-top: var(--spacing-8); }
