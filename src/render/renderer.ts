@@ -17,7 +17,8 @@ import type { SlideRender } from './types';
 
 const ACTIVE_DELAY_MS = 450;
 const BACKGROUND_DELAY_MS = 1200;
-const REQUEST_TIMEOUT_MS = 30_000;
+// Generous: a first render may include uploading a large picture.
+const REQUEST_TIMEOUT_MS = 60_000;
 const MEMORY_LIMIT = 80;
 // Enough for a crisp canvas at the usual zooms; originals stay in the deck.
 const RENDER_IMAGE_MAX = 1600;

@@ -344,6 +344,26 @@ export interface ExportSettings {
   // Create a prototype flow starting at the first slide so Penpot's View
   // mode can present the deck (only for top-level boards).
   createFlow: boolean;
+  // 'update' replaces the boards of a deck inserted before (where they are);
+  // 'new' always inserts a fresh copy.
+  mode?: 'new' | 'update';
+}
+
+// Where a deck was inserted before (boards tagged with its id).
+export interface DeckPlacement {
+  deckId: string;
+  pageId: string;
+  pageName: string;
+  count: number;
+}
+
+// A slide read back from its board in Penpot.
+export interface PulledSlide {
+  slideId: string;
+  nodes: SlideNode[];
+  background: string;
+  backgroundFills?: unknown[];
+  notes?: string;
 }
 
 // ─── Message Protocol (UI ↔ Plugin) ──────────────────────────────────────────
@@ -372,6 +392,9 @@ export type UIMessage =
   // Build the slide off-canvas exactly as "Insert" would and send back
   // Penpot's own SVG rendering of it.
   | { type: 'render-slide'; requestId: string; slide: Slide }
+  | { type: 'find-deck'; deckId: string }
+  // Read the deck's boards back from Penpot (changes made on the canvas).
+  | { type: 'pull-deck'; requestId: string; deckId: string; templates: Record<string, TemplateRef | null> }
   | { type: 'resize'; width: number; height: number };
 
 export type PluginMessage =
@@ -407,7 +430,18 @@ export type PluginMessage =
     }
   | { type: 'import-complete'; requestId: string; success: number; failed: number }
   | { type: 'asset'; requestId: string; node: SlideNode | null; message?: string }
-  | { type: 'insert-complete'; count: number; warnings: string[] }
+  | {
+      type: 'insert-complete';
+      count: number;
+      warnings: string[];
+      // Update in place: what happened to the boards already on the page.
+      updated?: number;
+      added?: number;
+      removed?: number;
+      pageName?: string;
+    }
+  | { type: 'deck-placement'; deckId: string; placement: DeckPlacement | null }
+  | { type: 'deck-pulled'; requestId: string; deckId: string; slides: PulledSlide[]; warnings: string[]; message?: string }
   | { type: 'decks'; decks: DeckSummary[] }
   | { type: 'deck-loaded'; deckId: string; deck: string | null }
   | { type: 'deck-saved'; requestId: string; deckId: string; ok: boolean; message?: string }

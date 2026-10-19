@@ -15,8 +15,10 @@ import type {
   ImportJobError,
   ImportPurpose,
   ImportedComponentPayload,
+  DeckPlacement,
+  PulledSlide,
 } from './types';
-import { cloneNodeWithNewIds, createDeck } from './deck';
+import { cloneNodeWithNewIds, createDeck, inferRoles } from './deck';
 import { readThumbnails, writeThumbnail } from './thumbCache';
 
 export type Screen = 'home' | 'library-picker' | 'slide-manager';
@@ -28,6 +30,14 @@ export interface Notice {
   details?: string[];
 }
 export type SidePanel = 'properties' | 'layers' | 'insert';
+
+export interface InsertResult {
+  count: number;
+  updated?: number;
+  added?: number;
+  removed?: number;
+  pageName?: string;
+}
 
 export type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error';
 
@@ -47,6 +57,7 @@ export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   createNewPage: true,
   slidePrefix: 'Slide',
   createFlow: true,
+  mode: 'update',
 };
 
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
@@ -268,8 +279,16 @@ interface SlideStore {
   setExportSettings: (settings: Partial<ExportSettings>) => void;
   isInserting: boolean;
   setIsInserting: (v: boolean) => void;
-  insertResult: { count: number } | null;
-  setInsertResult: (r: { count: number } | null) => void;
+  insertResult: InsertResult | null;
+  setInsertResult: (r: InsertResult | null) => void;
+
+  // Where the open deck was inserted before (undefined = not asked yet).
+  deckPlacement: DeckPlacement | null | undefined;
+  setDeckPlacement: (p: DeckPlacement | null | undefined) => void;
+  pullRequestId: string | null;
+  setPullRequestId: (id: string | null) => void;
+  // Replace slides with their boards' content as read from Penpot.
+  applyPulledSlides: (pulled: PulledSlide[]) => number;
 
   // ── Modals ─────────────────────────────────────────────────────────────────
   showNewSlideModal: boolean;
@@ -319,6 +338,8 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       // deck the user abandons should not litter the file.
       saveStatus: 'saved',
       saveError: null,
+      deckPlacement: null,
+      insertResult: null,
     });
   },
   openDeck: (deck) => {
@@ -335,6 +356,8 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
       saveStatus: 'saved',
       saveError: null,
       screen: 'slide-manager',
+      deckPlacement: undefined,
+      insertResult: null,
     });
   },
   closeDeck: () =>
@@ -695,6 +718,32 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   setIsInserting: (isInserting) => set({ isInserting }),
   insertResult: null,
   setInsertResult: (insertResult) => set({ insertResult }),
+
+  deckPlacement: undefined,
+  setDeckPlacement: (deckPlacement) => set({ deckPlacement }),
+  pullRequestId: null,
+  setPullRequestId: (pullRequestId) => set({ pullRequestId }),
+  applyPulledSlides: (pulled) => {
+    const byId = new Map(pulled.map((p) => [p.slideId, p]));
+    const touched = get().slides.filter((s) => byId.has(s.id)).length;
+    if (touched === 0) return 0;
+    get().commitHistory();
+    set((state) => ({
+      slides: state.slides.map((slide) => {
+        const p = byId.get(slide.id);
+        if (!p) return slide;
+        return {
+          ...slide,
+          nodes: inferRoles(p.nodes),
+          background: p.background,
+          backgroundFills: p.backgroundFills,
+          notes: p.notes ?? slide.notes,
+        };
+      }),
+      selectedNodeIds: [],
+    }));
+    return touched;
+  },
 
   // ── Modals ─────────────────────────────────────────────────────────────────
   showNewSlideModal: false,

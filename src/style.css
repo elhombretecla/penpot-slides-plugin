@@ -1976,3 +1976,20 @@ button {
   height: 100%;
   opacity: 0;
 }
+
+/* Deck already inserted */
+.export-placement {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6, 6px);
+  padding: var(--spacing-12);
+  border-radius: var(--spacing-8);
+  background: var(--background-tertiary);
+  border: 1px solid var(--background-quaternary);
+}
+.export-placement-title { color: var(--foreground-primary); font-weight: var(--font-weight-bold); }
+.export-radio { display: flex; align-items: center; gap: var(--spacing-8); cursor: pointer; color: var(--foreground-primary); }
+.export-radio input { accent-color: var(--accent-primary); margin: 0; }
+.export-placement-hint { color: var(--foreground-secondary); line-height: 1.4; margin: 0; }
+.export-pull { align-self: flex-start; }
+.export-pull:disabled { color: var(--foreground-secondary); cursor: default; }

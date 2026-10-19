@@ -84,6 +84,26 @@ export default function App() {
           }
           break;
 
+        case 'deck-placement':
+          if (store.deck?.id === data.deckId) store.setDeckPlacement(data.placement);
+          break;
+
+        case 'deck-pulled': {
+          if (store.pullRequestId !== data.requestId) break;
+          store.setPullRequestId(null);
+          if (data.message) {
+            store.pushNotice('error', `Could not read the slides from Penpot: ${data.message}`);
+            break;
+          }
+          const n = store.applyPulledSlides(data.slides);
+          const msg = n > 0
+            ? `${n} slide${n !== 1 ? 's' : ''} updated with the changes made in Penpot.`
+            : 'No slides of this presentation were found in Penpot.';
+          if (data.warnings.length > 0) store.pushNotice('warning', msg, data.warnings);
+          else store.pushNotice(n > 0 ? 'success' : 'warning', msg);
+          break;
+        }
+
         case 'slide-render':
           void receiveSlideRender(data.requestId, data.svg, data.shapes, data.message);
           break;
@@ -147,7 +167,14 @@ export default function App() {
 
         case 'insert-complete':
           store.setIsInserting(false);
-          store.setInsertResult({ count: data.count });
+          store.setInsertResult({
+            count: data.count,
+            updated: data.updated,
+            added: data.added,
+            removed: data.removed,
+            pageName: data.pageName,
+          });
+          if (store.deck) penpotApi.findDeck(store.deck.id);
           if (data.warnings.length > 0) {
             store.pushNotice(
               'warning',

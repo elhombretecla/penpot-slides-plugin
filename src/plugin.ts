@@ -12,6 +12,9 @@ import type {
   ComponentKind,
   LibraryColorInfo,
   LibraryTypographyInfo,
+  DeckPlacement,
+  PulledSlide,
+  TemplateRef,
 } from './types';
 import type {
   Board,
@@ -20,6 +23,7 @@ import type {
   Library,
   LibraryComponent,
   LibraryTypography,
+  Page,
   Shape,
   Stroke,
   Text,
@@ -76,6 +80,12 @@ penpot.ui.onMessage<UIMessage>((message) => {
       break;
     case 'render-slide':
       void handleRenderSlide(message.requestId, message.slide);
+      break;
+    case 'find-deck':
+      send({ type: 'deck-placement', deckId: message.deckId, placement: findDeckPlacement(message.deckId) });
+      break;
+    case 'pull-deck':
+      void exclusive(() => handlePullDeck(message.requestId, message.deckId, message.templates));
       break;
     case 'resize':
       penpot.ui.resize(message.width, message.height);
@@ -410,7 +420,10 @@ const SCRATCH_Y = -200000;
 let scratchQueue: Promise<unknown> = Promise.resolve();
 
 function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  const run = scratchQueue.then(fn);
+  const run = scratchQueue.then(() => {
+    sweepScratch();
+    return fn();
+  });
   scratchQueue = run.catch(() => undefined);
   return run;
 }
@@ -440,6 +453,31 @@ function removeQuietly(shape: Shape | null | undefined) {
     shape?.remove();
   } catch {
     // Already gone.
+  }
+}
+
+// Temporary shapes are tagged so that, if the plugin is closed in the middle
+// of a job, the next run finds and removes them.
+const SCRATCH_KEY = 'scratch';
+
+function markScratch<T extends Shape>(shape: T): T {
+  try {
+    shape.setSharedPluginData(DATA_NS, SCRATCH_KEY, '1');
+  } catch {
+    // Untagged: still removed by the job itself.
+  }
+  return shape;
+}
+
+function sweepScratch() {
+  try {
+    const root = penpot.root;
+    if (!root) return;
+    for (const shape of readChildren(root)) {
+      if (shape.getSharedPluginData(DATA_NS, SCRATCH_KEY) === '1') removeQuietly(shape);
+    }
+  } catch {
+    // Nothing to clean.
   }
 }
 
@@ -491,7 +529,7 @@ async function renderComponents(comps: LibraryComponent[]): Promise<(string | un
   const instances: Shape[] = [];
   try {
     comps.forEach((comp, i) => {
-      const instance = comp.instance();
+      const instance = markScratch(comp.instance());
       instance.x = SCRATCH_X;
       instance.y = SCRATCH_Y + i * 5000;
       instances.push(instance);
@@ -514,7 +552,7 @@ async function handleRenderSlide(requestId: string, slide: Slide) {
     const result = await exclusive(() =>
       withUndoBlock(async () => {
         const track = new Map<string, string>();
-        const board = createBoardForSlide(slide, `Slide preview · ${slide.name}`);
+        const board = markScratch(createBoardForSlide(slide, `Slide preview · ${slide.name}`));
         try {
           board.x = SCRATCH_X;
           board.y = SCRATCH_Y;
@@ -676,6 +714,7 @@ async function importSingleComponent(item: ImportItemRequest): Promise<ImportRes
   try {
     try {
       tempInstance = comp.instance() ?? null;
+      if (tempInstance) markScratch(tempInstance);
     } catch (err) {
       errors.push(`instance(): ${stringifyErr(err)}`);
     }
@@ -1228,7 +1267,7 @@ async function mediaDataUrl(id: string): Promise<string | null> {
   let result: string | null = null;
   let probe: Shape | null = null;
   try {
-    probe = penpot.createRectangle();
+    probe = markScratch(penpot.createRectangle());
     probe.x = -100000;
     probe.y = -100000;
     probe.fills = [{ fillOpacity: 1, fillImage: { id, width: 1, height: 1, mtype: 'image/png', keepAspectRatio: false } as unknown as ImageData }];
@@ -1331,6 +1370,14 @@ async function handleInsertIntoCanvas(
       return;
     }
 
+    if (settings.mode === 'update') {
+      const found = findDeckBoards(deckId);
+      if (found) {
+        await updateDeckInPlace(deckId, deckName, slides, settings, found.page, warnings);
+        return;
+      }
+    }
+
     if (settings.createNewPage) {
       const page = penpot.createPage();
       page.name = deckName || 'Slides';
@@ -1406,6 +1453,253 @@ async function handleInsertIntoCanvas(
   }
 }
 
+// ─── Inserted decks (update in place, read back) ─────────────────────────────
+
+interface DeckBoard {
+  board: Board;
+  slideId: string;
+}
+
+function slideTagOf(shape: Shape): { deckId: string; slideId: string } | null {
+  try {
+    const raw = shape.getSharedPluginData(DATA_NS, 'slide');
+    const tag = raw ? JSON.parse(raw) : null;
+    return tag && typeof tag.deckId === 'string' && typeof tag.slideId === 'string' ? tag : null;
+  } catch {
+    return null;
+  }
+}
+
+// Top-level slide boards, or inside one wrapper board ("Slides deck").
+function deckBoardsOn(page: Page, deckId: string): DeckBoard[] {
+  const out: DeckBoard[] = [];
+  const scan = (parent: Shape, depth: number) => {
+    for (const child of readChildren(parent)) {
+      if (child.type !== 'board') continue;
+      const tag = slideTagOf(child);
+      if (tag) {
+        if (tag.deckId === deckId) out.push({ board: child as Board, slideId: tag.slideId });
+      } else if (depth === 0) {
+        scan(child, 1);
+      }
+    }
+  };
+  if (page.root) scan(page.root, 0);
+  return out;
+}
+
+// The page holding most of the deck's boards.
+function findDeckBoards(deckId: string): { page: Page; boards: DeckBoard[] } | null {
+  let best: { page: Page; boards: DeckBoard[] } | null = null;
+  for (const page of penpot.currentFile?.pages ?? []) {
+    const boards = deckBoardsOn(page, deckId);
+    if (boards.length > 0 && (!best || boards.length > best.boards.length)) best = { page, boards };
+  }
+  return best;
+}
+
+function findDeckPlacement(deckId: string): DeckPlacement | null {
+  try {
+    const found = findDeckBoards(deckId);
+    return found ? { deckId, pageId: found.page.id, pageName: found.page.name, count: found.boards.length } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Each slide's board is rebuilt where the previous one was (same parent,
+// position and name); new slides go to the right of the row, boards of
+// slides deleted from the deck are removed.
+async function updateDeckInPlace(
+  deckId: string,
+  deckName: string,
+  slides: Slide[],
+  settings: ExportSettings,
+  page: Page,
+  warnings: string[]
+) {
+  if (penpot.currentPage?.id !== page.id) await penpot.openPage(page);
+  const current = penpot.currentPage ?? page;
+  const existing = deckBoardsOn(current, deckId);
+  const bySlide = new Map(existing.map((b) => [b.slideId, b.board]));
+  const rootId = current.root?.id;
+  const wrapper = existing
+    .map((b) => b.board.parent)
+    .find((p): p is Board => !!p && p.id !== rootId && p.type === 'board');
+
+  const topLevel = existing.filter((b) => b.board.parent?.id === rootId).map((b) => b.board);
+  let nextX = topLevel.length > 0 ? Math.max(...topLevel.map((b) => b.x + b.width)) + settings.spacing : penpot.viewport.center.x;
+  const rowY = topLevel.length > 0 ? Math.min(...topLevel.map((b) => b.y)) : penpot.viewport.center.y;
+
+  const boards: Board[] = [];
+  let updated = 0;
+  let added = 0;
+  for (let i = 0; i < slides.length; i++) {
+    const slide = slides[i];
+    const old = bySlide.get(slide.id);
+    bySlide.delete(slide.id);
+    const name = old?.name ?? `${settings.slidePrefix} ${String(i + 1).padStart(2, '0')}`;
+    const board = createBoardForSlide(slide, name);
+    tagBoard(board, deckId, slide);
+
+    const parent = old?.parent;
+    if (old && parent && parent.id !== rootId && parent.type === 'board') {
+      (parent as Board).insertChild(old.parentIndex, board);
+    } else if (old) {
+      board.x = old.x;
+      board.y = old.y;
+    } else if (wrapper) {
+      wrapper.appendChild(board);
+    } else {
+      board.x = nextX;
+      board.y = rowY;
+      nextX += slide.width + settings.spacing;
+    }
+    if (board.layoutChild) {
+      board.layoutChild.horizontalSizing = 'fix';
+      board.layoutChild.verticalSizing = 'fix';
+    }
+
+    try {
+      await populateSlide(board, slide, warnings);
+    } catch (err) {
+      warnings.push(`${name}: ${stringifyErr(err)}`);
+    }
+    if (old) {
+      removeQuietly(old);
+      updated++;
+    } else {
+      added++;
+    }
+    boards.push(board);
+  }
+
+  let removed = 0;
+  for (const old of bySlide.values()) {
+    removeQuietly(old);
+    removed++;
+  }
+
+  // The previous boards (and the flow pointing at the first one) are gone.
+  if (settings.createFlow && !wrapper && boards.length > 0) {
+    try {
+      const flowName = deckName || 'Presentation';
+      current.flows.filter((f) => f.name === flowName).forEach((f) => current.removeFlow(f));
+      current.createFlow(flowName, boards[0]);
+    } catch (err) {
+      warnings.push(`Could not update the presentation flow: ${stringifyErr(err)}`);
+    }
+  }
+
+  try {
+    penpot.selection = boards;
+  } catch {
+    // Selection is cosmetic.
+  }
+  send({
+    type: 'insert-complete',
+    count: boards.length,
+    warnings: dedupe(warnings),
+    updated,
+    added,
+    removed,
+    pageName: current.name,
+  });
+}
+
+function isCopyOf(shape: Shape, componentId: string): boolean {
+  try {
+    return shape.isComponentCopyInstance() && shape.component()?.id === componentId;
+  } catch {
+    return false;
+  }
+}
+
+function stripSlots(node: SlideNode): SlideNode {
+  const rest: SlideNode = { ...node };
+  delete rest.slotId;
+  delete rest.edited;
+  return rest.children ? { ...rest, children: rest.children.map(stripSlots) } : rest;
+}
+
+// Flag template content that was changed on the canvas, as the editor does.
+function markOverridden(nodes: SlideNode[], copy: Shape) {
+  const refs = new Map<string, Shape>();
+  for (const shape of descendants(copy)) {
+    try {
+      const ref = shape.componentRefShape();
+      if (ref) refs.set(shape.id, ref);
+    } catch {
+      // Not template content.
+    }
+  }
+  const imageId = (fills: unknown) =>
+    Array.isArray(fills) ? (fills as Fill[]).find((f) => f.fillImage)?.fillImage?.id : undefined;
+  const visit = (list: SlideNode[]) => {
+    for (const node of list) {
+      const ref = refs.get(node.id);
+      if (ref) {
+        if (node.type === 'text' && ref.type === 'text' && (ref as Text).characters !== node.text) node.edited = true;
+        const own = imageId(node.fills);
+        if (own && own !== imageId(ref.fills)) {
+          node.imageReplaced = true;
+          node.edited = true;
+        }
+      }
+      if (node.children) visit(node.children);
+    }
+  };
+  visit(nodes);
+}
+
+async function handlePullDeck(requestId: string, deckId: string, templates: Record<string, TemplateRef | null>) {
+  const warnings: string[] = [];
+  try {
+    const found = findDeckBoards(deckId);
+    if (!found) throw new Error('This presentation is not on any page of the file.');
+    const slides: PulledSlide[] = [];
+    for (const { board, slideId } of found.boards) {
+      if (!(slideId in templates)) continue; // slide deleted from the deck since
+      const template = templates[slideId];
+      const lib = template ? findLibraryComponent(template.libraryId, template.componentId)?.lib : null;
+      const ctx: ImportContext = {
+        rootComponentId: template?.componentId ?? '',
+        warnings,
+        typographies: lib ? [...lib.typographies] : allLibraries().flatMap((l) => l.typographies),
+      };
+      const nodes: SlideNode[] = [];
+      let backgroundShape: Shape = board;
+      for (const child of readChildren(board)) {
+        if (template && isCopyOf(child, template.componentId)) {
+          backgroundShape = child;
+          const inner = await importChildren(readChildren(child), board.x, board.y, ctx);
+          markOverridden(inner, child);
+          nodes.push(...inner);
+        } else {
+          const node = await importShapeSafe(child, board.x, board.y, ctx);
+          if (node) nodes.push(stripSlots(node));
+        }
+      }
+      let notes: string | undefined;
+      try {
+        notes = board.getSharedPluginData(DATA_NS, 'notes') || undefined;
+      } catch {
+        notes = undefined;
+      }
+      slides.push({
+        slideId,
+        nodes,
+        background: readBackground(backgroundShape) ?? '#ffffff',
+        backgroundFills: readFillsSnapshot(backgroundShape),
+        notes,
+      });
+    }
+    send({ type: 'deck-pulled', requestId, deckId, slides, warnings: dedupe(warnings) });
+  } catch (err) {
+    send({ type: 'deck-pulled', requestId, deckId, slides: [], warnings, message: stringifyErr(err) });
+  }
+}
+
 function createDeck(totalWidth: number, maxHeight: number, gap: number, center: { x: number; y: number }): Board {
   const deckWidth = totalWidth + DECK_PADDING * 2;
   const deckHeight = maxHeight + DECK_PADDING * 2;
@@ -1470,23 +1764,231 @@ async function populateSlide(
   warnings: string[],
   track?: Map<string, string>
 ) {
-  // Library slide without extracted nodes: drop in a linked instance.
-  if (slide.template && slide.nodes.length === 0) {
+  // Template slides are a linked copy of the template plus the slide's
+  // changes as overrides; elements the user added go on top of it (a copy's
+  // structure can't change).
+  if (slide.template) {
     const found = findLibraryComponent(slide.template.libraryId, slide.template.componentId);
-    if (!found) {
+    if (found) {
+      const instance = found.comp.instance();
+      board.appendChild(instance);
+      instance.x = board.x;
+      instance.y = board.y;
+      const free = slide.nodes.length > 0 ? await applySlideToInstance(instance, slide, warnings, track) : [];
+      const created = await populateNodes(board, free, board.x, board.y, warnings, track);
+      pinStacking([instance, ...created]);
+      return;
+    }
+    if (slide.nodes.length === 0) {
       warnings.push(`"${slide.name}": template component not found — the slide is empty.`);
       return;
     }
-    const instance = found.comp.instance();
-    board.appendChild(instance);
-    instance.x = board.x;
-    instance.y = board.y;
-    return;
+    warnings.push(`"${slide.name}": template "${slide.template.componentName}" not found — inserted as a detached copy.`);
   }
 
   // SlideNode coordinates are slide-relative; Penpot coordinates are
   // absolute, so offset by the board's (post-layout) position.
-  await populateNodes(board, slide.nodes, board.x, board.y, warnings, track);
+  pinStacking(await populateNodes(board, slide.nodes, board.x, board.y, warnings, track));
+}
+
+// appendChild normally stacks in call order, but with slow steps in between
+// (image uploads) Penpot has been seen placing a shape at the bottom. Pin the
+// final order explicitly: `ordered` is bottom → top.
+function pinStacking(ordered: Shape[]) {
+  ordered.forEach((shape, index) => {
+    try {
+      if (shape.parentIndex !== index) shape.setParentIndex(index);
+    } catch {
+      // Order is best effort; the content is there.
+    }
+  });
+}
+
+// ─── Linked template slides ──────────────────────────────────────────────────
+// Every node imported from a template remembers its slot (the main
+// component's shape id). On a fresh copy each slot is found through
+// componentRefShape() and only what differs from the template is written, so
+// untouched properties keep following the library.
+
+function refIdOf(shape: Shape): string | null {
+  try {
+    return shape.componentRefShape()?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function descendants(root: Shape): Shape[] {
+  const out: Shape[] = [];
+  const visit = (shape: Shape) => {
+    for (const child of readChildren(shape)) {
+      out.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+const differs = (a: number | undefined, b: number | undefined, tolerance = 0.5) =>
+  Math.abs((a ?? 0) - (b ?? 0)) > tolerance;
+
+// Fills compared by what they look like and what they link to, not by object
+// shape, so a value read back from Penpot equals the one stored in the deck.
+function fillsKey(fills: unknown): string {
+  if (!Array.isArray(fills)) return '';
+  return fills
+    .map((f: Partial<Fill>) =>
+      [
+        (f.fillColor ?? '').toLowerCase(),
+        Math.round((f.fillOpacity ?? 1) * 1000),
+        f.fillColorRefId ?? '',
+        (f.fillImage as { id?: string } | undefined)?.id ?? '',
+        f.fillColorGradient ? JSON.stringify(f.fillColorGradient) : '',
+      ].join('|')
+    )
+    .join(';');
+}
+
+function strokesKey(strokes: unknown): string {
+  if (!Array.isArray(strokes)) return '';
+  return strokes
+    .map((s: Partial<Stroke>) =>
+      [(s.strokeColor ?? '').toLowerCase(), s.strokeWidth ?? 0, s.strokeOpacity ?? 1, s.strokeStyle ?? '', s.strokeAlignment ?? '', s.strokeColorRefId ?? ''].join('|')
+    )
+    .join(';');
+}
+
+function slideBackgroundFills(slide: Slide): Fill[] {
+  return slide.backgroundFills && slide.backgroundFills.length > 0
+    ? (clonePlain(slide.backgroundFills) as Fill[])
+    : [{ fillColor: slide.background, fillOpacity: 1 }];
+}
+
+async function applySlideToInstance(
+  instance: Shape,
+  slide: Slide,
+  warnings: string[],
+  track?: Map<string, string>
+): Promise<SlideNode[]> {
+  const bySlot = new Map<string, Shape>();
+  for (const shape of descendants(instance)) {
+    const ref = refIdOf(shape);
+    if (ref && !bySlot.has(ref)) bySlot.set(ref, shape);
+  }
+
+  const background = slideBackgroundFills(slide);
+  if (fillsKey(instance.fills) !== fillsKey(background)) instance.fills = background;
+
+  const kept = new Set<string>([instance.id]);
+  const free: SlideNode[] = [];
+
+  const visit = async (nodes: SlideNode[], parentX: number, parentY: number, topLevel: boolean) => {
+    for (const node of nodes) {
+      const absX = parentX + node.x;
+      const absY = parentY + node.y;
+      const shape = node.slotId ? bySlot.get(node.slotId) : undefined;
+      if (!shape || kept.has(shape.id)) {
+        // Not template content (or a second copy of it): a free element, in
+        // slide coordinates.
+        free.push(topLevel ? node : { ...node, x: absX - instance.x, y: absY - instance.y });
+        continue;
+      }
+      kept.add(shape.id);
+      if (topLevel) track?.set(shape.id, node.id);
+      try {
+        await applyNodeOverrides(shape, node, absX, absY, warnings);
+      } catch (err) {
+        warnings.push(`"${node.name}": ${stringifyErr(err)}`);
+      }
+      if (node.type === 'group' && node.children && (shape.type === 'group' || shape.type === 'board')) {
+        await visit(node.children, absX, absY, false);
+      } else {
+        // Leaves of the model (nested components, vectors) own their subtree.
+        descendants(shape).forEach((d) => kept.add(d.id));
+      }
+    }
+  };
+  await visit(slide.nodes, instance.x, instance.y, true);
+
+  // Template content deleted in the editor is hidden (a copy can't lose
+  // children); hiding the topmost removed shape hides its subtree.
+  for (const shape of bySlot.values()) {
+    if (kept.has(shape.id) || shape.hidden) continue;
+    const parentId = shape.parent?.id;
+    if (parentId && kept.has(parentId)) shape.hidden = true;
+  }
+  return free;
+}
+
+async function applyNodeOverrides(shape: Shape, node: SlideNode, absX: number, absY: number, warnings: string[]) {
+  if (!!shape.hidden !== !node.visible) shape.hidden = !node.visible;
+  if (!node.visible) return;
+  if (differs(shape.opacity ?? 1, node.opacity, 0.001)) shape.opacity = node.opacity;
+
+  // Geometry (unrotated boxes only: rotated ones are compared by angle).
+  if (!shape.rotation && !node.rotation) {
+    const text = shape.type === 'text' ? (shape as Text) : null;
+    const growType = text?.growType;
+    const width = growType === 'auto-width' ? shape.width : node.width;
+    const height = growType === 'auto-width' || growType === 'auto-height' ? shape.height : node.height;
+    if (differs(shape.width, width) || differs(shape.height, height)) {
+      if (node.type === 'component-instance') scaleInstanceTo(shape, width, height);
+      else shape.resize(Math.max(0.01, width), Math.max(0.01, height));
+      // resize() forces 'fixed'; keep the template's text behaviour.
+      if (text && growType && text.growType !== growType) text.growType = growType;
+    }
+    if (differs(shape.x, absX)) shape.x = absX;
+    if (differs(shape.y, absY)) shape.y = absY;
+  } else if (differs(shape.rotation, node.rotation, 0.01)) {
+    shape.rotation = node.rotation;
+  }
+
+  if (shape.type === 'text' && node.type === 'text') {
+    const text = shape as Text;
+    if (node.text !== undefined && text.characters !== node.text) text.characters = node.text || ' ';
+    if (textStyleDiffers(readTextStyle(text), node)) applyTextStyle(text, node, warnings);
+    if (node.fills?.length) {
+      if (fillsKey(text.fills) !== fillsKey(node.fills)) text.fills = clonePlain(node.fills) as Fill[];
+    } else if (node.fontColor && fillsKey(text.fills) !== fillsKey([{ fillColor: node.fontColor, fillOpacity: 1 }])) {
+      text.fills = [{ fillColor: node.fontColor, fillOpacity: 1 }];
+    }
+    return;
+  }
+
+  if (node.type === 'component-instance') return;
+
+  const current = Array.isArray(shape.fills) ? (shape.fills as Fill[]) : [];
+  if (node.imageReplaced) {
+    // Vector shapes with an image don't expose it in fills: rebuild from the
+    // node's own fill stack.
+    const base = node.type === 'path' ? (clonePlain(node.fills ?? []) as Fill[]) : clonePlain(current);
+    shape.fills = await withReplacedImage(base, node, warnings);
+  } else if (node.type !== 'path' && node.fills && fillsKey(current) !== fillsKey(node.fills)) {
+    shape.fills = clonePlain(node.fills) as Fill[];
+  }
+  if (node.strokes && strokesKey(shape.strokes) !== strokesKey(node.strokes)) {
+    shape.strokes = clonePlain(node.strokes) as Stroke[];
+  }
+  if (shape.type === 'rectangle' && node.borderRadius !== undefined && differs(shape.borderRadius, node.borderRadius, 0.01)) {
+    shape.borderRadius = node.borderRadius;
+  }
+}
+
+function textStyleDiffers(current: Partial<SlideNode>, node: SlideNode): boolean {
+  const str = (v: unknown) => (v == null || v === 'none' ? '' : String(v));
+  return (
+    (!!node.fontId && current.fontId !== node.fontId) ||
+    differs(current.fontSize, node.fontSize, 0.01) ||
+    (!!node.fontWeight && str(current.fontWeight) !== str(node.fontWeight)) ||
+    str(current.fontStyle ?? 'normal') !== str(node.fontStyle ?? 'normal') ||
+    differs(current.lineHeight, node.lineHeight ?? current.lineHeight, 0.01) ||
+    differs(current.letterSpacing, node.letterSpacing ?? current.letterSpacing, 0.01) ||
+    str(current.textAlign ?? 'left') !== str(node.textAlign ?? 'left') ||
+    str(current.verticalAlign ?? 'top') !== str(node.verticalAlign ?? 'top') ||
+    str(current.textTransform) !== str(node.textTransform) ||
+    str(current.textDecoration) !== str(node.textDecoration)
+  );
 }
 
 // Recursive populator. Nodes are appended in model order (bottom → top):
@@ -1881,3 +2383,6 @@ function sendError(message: string) {
 function dedupe(items: string[]): string[] {
   return [...new Set(items)];
 }
+
+// Leftovers of a job interrupted by closing the plugin.
+sweepScratch();

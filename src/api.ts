@@ -3,7 +3,7 @@
  * All functions send typed messages to plugin.ts and return void;
  * responses are handled in App.tsx via a global message listener.
  */
-import type { UIMessage, Slide, ExportSettings, ImportItemRequest, DeckSummary } from './types';
+import type { UIMessage, Slide, ExportSettings, ImportItemRequest, DeckSummary, TemplateRef } from './types';
 
 function send(message: UIMessage) {
   parent.postMessage(message, '*');
@@ -28,5 +28,8 @@ export const penpotApi = {
     send({ type: 'save-deck', requestId, deck, summary }),
   deleteDeck: (deckId: string) => send({ type: 'delete-deck', deckId }),
   renderSlide: (requestId: string, slide: Slide) => send({ type: 'render-slide', requestId, slide }),
+  findDeck: (deckId: string) => send({ type: 'find-deck', deckId }),
+  pullDeck: (requestId: string, deckId: string, templates: Record<string, TemplateRef | null>) =>
+    send({ type: 'pull-deck', requestId, deckId, templates }),
   resize: (width: number, height: number) => send({ type: 'resize', width, height }),
 };

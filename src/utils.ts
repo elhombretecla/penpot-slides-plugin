@@ -240,19 +240,61 @@ export function makeImageNode(
 }
 
 // Read a user-picked image file as a data URL plus its natural size.
+// Pictures added to slides are reduced to what a slide can show: phone
+// photos and 4K images (several MB) made uploads to Penpot take 15–20 s per
+// render and bloated the deck saved in the file. Small files, SVG and GIF
+// (animation) are kept as they are.
+const IMAGE_MAX_SIDE = 2560;
+const IMAGE_KEEP_BYTES = 600_000;
+
 export function readImageFile(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read the file.'));
     reader.onload = () => {
-      const dataUrl = String(reader.result);
+      const original = String(reader.result);
       const img = new Image();
-      img.onload = () => resolve({ dataUrl, width: img.naturalWidth || 400, height: img.naturalHeight || 300 });
+      img.onload = () => {
+        const width = img.naturalWidth || 400;
+        const height = img.naturalHeight || 300;
+        const keep =
+          /^data:image\/(svg\+xml|gif)/.test(original) ||
+          (file.size <= IMAGE_KEEP_BYTES && Math.max(width, height) <= IMAGE_MAX_SIDE);
+        if (keep) {
+          resolve({ dataUrl: original, width, height });
+          return;
+        }
+        const ratio = Math.min(1, IMAGE_MAX_SIDE / Math.max(width, height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(width * ratio));
+        canvas.height = Math.max(1, Math.round(height * ratio));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ dataUrl: original, width, height });
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        // PNG/WebP may be transparent; everything else is a photo.
+        const transparent = /^data:image\/(png|webp)/.test(original) && hasTransparency(ctx, canvas.width, canvas.height);
+        const reduced = transparent ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.88);
+        // Size and aspect are those of the picture, not of the reduced copy.
+        resolve({ dataUrl: reduced.length < original.length ? reduced : original, width, height });
+      };
       img.onerror = () => reject(new Error('The file is not a supported image.'));
-      img.src = dataUrl;
+      img.src = original;
     };
     reader.readAsDataURL(file);
   });
+}
+
+function hasTransparency(ctx: CanvasRenderingContext2D, width: number, height: number): boolean {
+  try {
+    const { data } = ctx.getImageData(0, 0, width, height);
+    for (let i = 3; i < data.length; i += 4 * 16) if (data[i] < 250) return true;
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 // ─── Misc Helpers ─────────────────────────────────────────────────────────────
