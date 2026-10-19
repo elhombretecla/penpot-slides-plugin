@@ -4,6 +4,7 @@ import { penpotApi } from '../api';
 import type { DeckSummary, LibraryInfo } from '../types';
 import SvgView from '../components/SvgView';
 import { findRender } from '../render/renderer';
+import WindowSizeButton from '../components/WindowSizeButton';
 
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
@@ -57,6 +58,9 @@ export default function HomeScreen() {
         </span>
         <span className="title-s" style={{ color: 'var(--foreground-primary)' }}>Slide Builder</span>
         {fileName && <span className="body-xs home-file-name" title={fileName}>· {fileName}</span>}
+        <span className="home-header-actions">
+          <WindowSizeButton />
+        </span>
       </div>
 
       <div className="home-body">

@@ -111,6 +111,8 @@ window.addEventListener('message', async (e) => {
       send({ type: 'deck-pulled', requestId: m.requestId, deckId: m.deckId, slides, warnings: [] });
       break;
     }
+    case 'set-maximized': window.__maximized = m.maximized; send({ type: 'window-state', maximized: m.maximized }); break;
+    case 'get-window-state': send({ type: 'window-state', maximized: !!window.__maximized }); break;
     case 'insert-into-canvas': window.__inserts.push(m); if (m.settings.mode === 'update' && window.__inserts.length > 1) { send({ type: 'insert-complete', count: m.slides.length, warnings: [], updated: m.slides.length, added: 0, removed: 0, pageName: m.deckName }); break; } send({ type: 'insert-complete', count: m.slides.length, warnings: [] }); break;
   }
 });

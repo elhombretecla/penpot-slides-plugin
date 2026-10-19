@@ -425,7 +425,10 @@ export type UIMessage =
   | { type: 'create-color'; requestId: string; name: string; color: string; opacity: number }
   // Read the deck's boards back from Penpot (changes made on the canvas).
   | { type: 'pull-deck'; requestId: string; deckId: string; templates: Record<string, TemplateRef | null> }
-  | { type: 'resize'; width: number; height: number };
+  | { type: 'resize'; width: number; height: number }
+  // Fill the browser tab with the plugin window, or restore its size.
+  | { type: 'set-maximized'; maximized: boolean }
+  | { type: 'get-window-state' };
 
 export type PluginMessage =
   | { type: 'libraries'; libraries: LibraryInfo[]; fileId: string; fileName: string; localLibraryId: string }
@@ -490,4 +493,5 @@ export type PluginMessage =
       message?: string;
     }
   | { type: 'error'; message: string }
-  | { type: 'theme'; theme: string };
+  | { type: 'theme'; theme: string }
+  | { type: 'window-state'; maximized: boolean };

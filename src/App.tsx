@@ -39,6 +39,8 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => startAutosave(), []);
+  // The plugin may have opened the window filling the tab already.
+  useEffect(() => penpotApi.getWindowState(), []);
   useEffect(() => startRenderer(), []);
 
   // Listen to messages from plugin.ts
@@ -56,6 +58,10 @@ export default function App() {
       const store = useSlideStore.getState();
 
       switch (data.type) {
+        case 'window-state':
+          store.setWindowMaximized(data.maximized);
+          break;
+
         case 'libraries':
           store.setLibraries(data.libraries, data.fileName);
           store.setLocalLibraryId(data.localLibraryId);

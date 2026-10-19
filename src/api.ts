@@ -38,4 +38,6 @@ export const penpotApi = {
   pullDeck: (requestId: string, deckId: string, templates: Record<string, TemplateRef | null>) =>
     send({ type: 'pull-deck', requestId, deckId, templates }),
   resize: (width: number, height: number) => send({ type: 'resize', width, height }),
+  setMaximized: (maximized: boolean) => send({ type: 'set-maximized', maximized }),
+  getWindowState: () => send({ type: 'get-window-state' }),
 };

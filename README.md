@@ -44,6 +44,9 @@ you can keep updating — or edit in Penpot and bring back into the editor.
 **Presenting and organising**
 - Grid view of the whole deck with drag-to-reorder.
 - Presentation mode inside the plugin with speaker notes.
+- The window button in the top bar makes the plugin fill the browser tab
+  (Penpot keeps a 40 px margin) and is remembered for the next opening
+  (`allow:localstorage` permission).
 
 ## Keyboard shortcuts
 

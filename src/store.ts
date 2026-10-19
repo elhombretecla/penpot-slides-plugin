@@ -181,6 +181,9 @@ interface SlideStore {
   // ── Theme ──────────────────────────────────────────────────────────────────
   theme: 'light' | 'dark';
   setTheme: (theme: 'light' | 'dark') => void;
+  // The plugin window fills the browser tab.
+  windowMaximized: boolean;
+  setWindowMaximized: (on: boolean) => void;
 
   // ── File & decks ───────────────────────────────────────────────────────────
   fileName: string;
@@ -353,6 +356,8 @@ export const useSlideStore = create<SlideStore>((set, get) => ({
   // ── Theme ──────────────────────────────────────────────────────────────────
   theme: 'dark',
   setTheme: (theme) => set({ theme }),
+  windowMaximized: false,
+  setWindowMaximized: (windowMaximized) => set({ windowMaximized }),
 
   // ── File & decks ───────────────────────────────────────────────────────────
   fileName: '',

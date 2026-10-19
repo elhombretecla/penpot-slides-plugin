@@ -13,6 +13,7 @@ import Thumbnail from '../components/Thumbnail';
 import RenderToggle from '../components/RenderToggle';
 import SlideGrid from '../components/SlideGrid';
 import Presenter from '../components/Presenter';
+import WindowSizeButton from '../components/WindowSizeButton';
 
 export default function SlideManager() {
   const slides = useSlideStore((s) => s.slides);
@@ -124,6 +125,7 @@ export default function SlideManager() {
             </svg>
             Insert into Penpot
           </button>
+          <WindowSizeButton />
         </div>
       </div>
 

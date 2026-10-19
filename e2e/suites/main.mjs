@@ -10,6 +10,15 @@ export default async function main({ page, f, step, shot }) {
   await step('home renders', async () => { await f.getByText('Presentations in this file').waitFor({ timeout: 5000 }); await f.getByText('Brand templates').first().waitFor(); });
   await shot('01-home');
 
+  await step('window fills the tab and restores', async () => {
+    const btn = f.getByTitle('Fill the browser tab');
+    await btn.click();
+    await f.getByTitle('Restore window size').waitFor({ timeout: 2000 });
+    if (!(await page.evaluate(() => window.__maximized))) throw new Error('plugin not asked');
+    await f.getByTitle('Restore window size').click();
+    await f.getByTitle('Fill the browser tab').waitFor({ timeout: 2000 });
+    if (await page.evaluate(() => window.__maximized)) throw new Error('not restored');
+  });
   await step('open gallery from library', async () => { await f.getByText('From a template library').click(); await f.getByText('New presentation from a library').waitFor(); });
   await page.waitForTimeout(600);
   await step('gallery shows only slide layouts', async () => {

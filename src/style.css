@@ -2381,3 +2381,8 @@ input[type='number']::-webkit-outer-spin-button {
 }
 .error-screen-hint { color: var(--foreground-secondary); }
 .error-screen-actions { display: flex; gap: var(--spacing-8); margin-top: var(--spacing-8); }
+
+/* Window size toggle (top bars) */
+.home-header-actions { margin-left: auto; display: flex; align-items: center; }
+.window-size-btn { color: var(--foreground-secondary); }
+.window-size-btn[aria-pressed='true'] { color: var(--accent-primary); }

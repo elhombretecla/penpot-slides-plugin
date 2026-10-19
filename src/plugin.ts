@@ -6,13 +6,9 @@ import { exclusive, sweepScratch } from './plugin/jobs';
 import { handleImportComponents } from './plugin/import';
 import { handleInsertIntoCanvas, findDeckPlacement, handlePullDeck } from './plugin/insert';
 import { send } from './plugin/util';
+import { openWindow, sendWindowState, setMaximized } from './plugin/window';
 
-// Open the plugin UI at a comfortable size for a slide editor: slide list,
-// canvas, speaker notes and the design panel side by side.
-penpot.ui.open('Slide Builder', `?theme=${penpot.theme}`, {
-  width: 1040,
-  height: 720,
-});
+openWindow();
 
 // ─── Message Handler ──────────────────────────────────────────────────────────
 
@@ -79,6 +75,12 @@ penpot.ui.onMessage<UIMessage>((message) => {
       break;
     case 'resize':
       penpot.ui.resize(message.width, message.height);
+      break;
+    case 'set-maximized':
+      setMaximized(message.maximized);
+      break;
+    case 'get-window-state':
+      sendWindowState();
       break;
   }
 });
