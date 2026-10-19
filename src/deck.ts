@@ -8,6 +8,7 @@ import type {
   SlotRole,
 } from './types';
 import { DECK_SCHEMA_VERSION, SLIDE_SIZE_PRESETS } from './types';
+import { hashString, slideRenderKey } from './render/keys';
 
 // ─── Persistence format ───────────────────────────────────────────────────────
 // Decks are stored as JSON in the Penpot file. Heavy previews are kept out of
@@ -20,16 +21,6 @@ const MEDIA_PREFIX = 'media:';
 interface StoredDeck extends Omit<Deck, 'slides'> {
   slides: Slide[];
   media: Record<string, string>;
-}
-
-function hashString(value: string): string {
-  // FNV-1a, 32 bit — plenty to dedupe a few hundred images.
-  let h = 0x811c9dc5;
-  for (let i = 0; i < value.length; i++) {
-    h ^= value.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36) + value.length.toString(36);
 }
 
 export function svgDataUrl(svg: string): string {
@@ -118,6 +109,7 @@ export function summarizeDeck(deck: Deck): DeckSummary {
     width: first?.width ?? SLIDE_SIZE_PRESETS['16:9'].width,
     height: first?.height ?? SLIDE_SIZE_PRESETS['16:9'].height,
     libraryName: deck.libraryName,
+    coverKey: first ? slideRenderKey(first) : undefined,
   };
 }
 

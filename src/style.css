@@ -1728,6 +1728,8 @@ button {
   justify-content: center;
   color: var(--foreground-secondary);
 }
+.deck-row-thumb { overflow: hidden; }
+.deck-row-cover { width: 100%; height: 100%; }
 .deck-row-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .deck-row-name { font-weight: var(--font-weight-bold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .deck-row-meta { color: var(--foreground-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1817,6 +1819,7 @@ button {
   font-family: inherit;
 }
 .add-slide-layout img,
+.add-slide-layout .thumbnail-svg,
 .add-slide-layout-placeholder {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1873,7 +1876,7 @@ button {
 }
 .insert-asset:hover:not(:disabled) { border-color: var(--accent-primary); color: var(--foreground-primary); }
 .insert-asset:disabled { opacity: 0.6; cursor: progress; }
-.insert-asset img, .insert-asset-placeholder {
+.insert-asset img, .insert-asset .thumbnail-svg, .insert-asset-placeholder {
   width: 100%;
   aspect-ratio: 1;
   object-fit: contain;
@@ -1912,3 +1915,64 @@ button {
 .prop-swatch.active { outline: 2px solid var(--accent-primary); outline-offset: 1px; }
 .align-btn--text { width: auto; padding: 0 var(--spacing-8); font-size: var(--font-size-xs); }
 .prop-button-row .prop-btn { flex: 1; white-space: nowrap; justify-content: center; }
+
+/* ─── Penpot renders (inline SVG) ─────────────────────────────────────────── */
+
+.svg-view {
+  display: block;
+  line-height: 0;
+  overflow: hidden;
+}
+
+.svg-view > svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.component-preview-img > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.component-preview-img .thumbnail-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.canvas-render {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.manager-topbar-actions .render-toggle {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.render-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--foreground-secondary);
+  flex-shrink: 0;
+}
+
+.render-dot--idle { background: var(--accent-primary, #00d1b8); }
+.render-dot--rendering { background: #f5a623; animation: render-pulse 0.9s ease-in-out infinite alternate; }
+.render-dot--error { background: #e5484d; }
+
+@keyframes render-pulse {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+.canvas-node-ghost {
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+}

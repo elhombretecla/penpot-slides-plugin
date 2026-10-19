@@ -52,13 +52,15 @@ penpot.ui.onMessage<UIMessage>((message) => {
       void handleGetThumbnails(message.requestId, message.libraryId, message.known, message.force);
       break;
     case 'import-components':
-      void handleImportComponents(message.requestId, message.items);
+      void exclusive(() => handleImportComponents(message.requestId, message.items));
       break;
     case 'get-asset':
       void handleGetAsset(message.requestId, message.libraryId, message.componentId);
       break;
     case 'insert-into-canvas':
-      void handleInsertIntoCanvas(message.deckId, message.deckName, message.slides, message.settings);
+      void exclusive(() =>
+        handleInsertIntoCanvas(message.deckId, message.deckName, message.slides, message.settings)
+      );
       break;
     case 'list-decks':
       send({ type: 'decks', decks: readDeckIndex() });
@@ -71,6 +73,9 @@ penpot.ui.onMessage<UIMessage>((message) => {
       break;
     case 'delete-deck':
       handleDeleteDeck(message.deckId);
+      break;
+    case 'render-slide':
+      void handleRenderSlide(message.requestId, message.slide);
       break;
     case 'resize':
       penpot.ui.resize(message.width, message.height);
@@ -291,12 +296,13 @@ function handleGetCatalog(requestId: string, libraryId: string) {
   }
 }
 
-// Thumbnails go through Penpot's exporter, which is server-side and slow
-// (seconds per component), so the job is cancellable — a newer request
-// supersedes the running one — and signature-checked: the UI caches
-// thumbnails across sessions and only changed components are re-rendered.
+// Thumbnails are Penpot's own client-side SVG of a temporary instance (the
+// main component lives on another page, where text is not rendered). The job
+// is cancellable — a newer request supersedes the running one — and
+// signature-checked: the UI caches thumbnails across sessions and only
+// changed components are re-rendered.
 const THUMBNAIL_WIDTH = 320;
-const THUMBNAIL_CONCURRENCY = 3;
+const THUMBNAIL_BATCH = 4;
 let activeThumbnailRequest: string | null = null;
 
 async function handleGetThumbnails(
@@ -306,40 +312,39 @@ async function handleGetThumbnails(
   force: boolean
 ) {
   activeThumbnailRequest = requestId;
+  const current = () => activeThumbnailRequest === requestId;
   try {
     const lib = findLibrary(libraryId);
     if (!lib) return;
 
-    const queue = [...lib.components];
-    const worker = async () => {
-      while (queue.length > 0 && activeThumbnailRequest === requestId) {
-        const comp = queue.shift()!;
-        try {
-          const main = comp.mainInstance();
-          if (!main) continue;
-          const signature = componentSignature(main);
-          if (!force && known[comp.id] === signature) continue;
-          const scale = Math.min(1, THUMBNAIL_WIDTH / Math.max(1, main.width));
-          const bytes = await main.export({ type: 'png', scale });
-          if (activeThumbnailRequest !== requestId) return;
-          send({
-            type: 'thumbnail',
-            requestId,
-            componentId: comp.id,
-            thumbnail: `data:image/png;base64,${uint8ArrayToBase64(bytes)}`,
-            signature,
-          });
-        } catch {
-          // No thumbnail for this component — the card falls back to a
-          // placeholder once `thumbnails-complete` arrives.
-        }
+    const todo: { comp: LibraryComponent; main: Shape; signature: string }[] = [];
+    for (const comp of lib.components) {
+      if (!current()) return;
+      try {
+        const main = comp.mainInstance();
+        if (!main) continue;
+        const signature = componentSignature(main);
+        if (!force && known[comp.id] === signature) continue;
+        todo.push({ comp, main, signature });
+      } catch {
+        // Unreadable component: the card shows a placeholder.
       }
-    };
-    await Promise.all(Array.from({ length: THUMBNAIL_CONCURRENCY }, worker));
-  } finally {
-    if (activeThumbnailRequest === requestId) {
-      send({ type: 'thumbnails-complete', requestId });
     }
+
+    for (let i = 0; i < todo.length && current(); i += THUMBNAIL_BATCH) {
+      const batch = todo.slice(i, i + THUMBNAIL_BATCH);
+      const rendered = await exclusive(() => withUndoBlock(() => renderComponents(batch.map((b) => b.comp))));
+      for (let j = 0; j < batch.length && current(); j++) {
+        const { comp, main, signature } = batch[j];
+        // The server exporter (seconds) is only a last resort.
+        const thumbnail =
+          rendered[j] ?? (await safeExportPng(main, Math.min(1, THUMBNAIL_WIDTH / Math.max(1, main.width))));
+        if (!thumbnail || !current()) continue;
+        send({ type: 'thumbnail', requestId, componentId: comp.id, thumbnail, signature });
+      }
+    }
+  } finally {
+    if (current()) send({ type: 'thumbnails-complete', requestId });
   }
 }
 
@@ -367,8 +372,7 @@ async function handleGetAsset(requestId: string, libraryId: string, componentId:
     const found = findLibraryComponent(libraryId, componentId);
     if (!found) throw new Error('Component not found in the library.');
     const main = found.comp.mainInstance();
-    const raw = safeMarkup(main);
-    const svgMarkup = raw ? await inlineMedia(raw) : undefined;
+    const [svgMarkup] = await exclusive(() => withUndoBlock(() => renderComponents([found.comp])));
     const node: SlideNode = {
       id: `${componentId}-asset`,
       type: 'component-instance',
@@ -390,6 +394,142 @@ async function handleGetAsset(requestId: string, libraryId: string, componentId:
     send({ type: 'asset', requestId, node });
   } catch (err) {
     send({ type: 'asset', requestId, node: null, message: stringifyErr(err) });
+  }
+}
+
+// ─── Render engine ───────────────────────────────────────────────────────────
+// Previews are Penpot's own rendering: the slide (or component) is built
+// off-canvas on the current page with the same code as "Insert", rendered
+// with generateMarkup (client-side, ~60 ms) and removed. Scratch work runs
+// one job at a time and inside an undo block, so it never interleaves with an
+// insert or import and leaves a single, empty entry in the user's history.
+
+const SCRATCH_X = -200000;
+const SCRATCH_Y = -200000;
+
+let scratchQueue: Promise<unknown> = Promise.resolve();
+
+function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  const run = scratchQueue.then(fn);
+  scratchQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function withUndoBlock<T>(fn: () => Promise<T>): Promise<T> {
+  let block: ReturnType<typeof penpot.history.undoBlockBegin> | null = null;
+  try {
+    block = penpot.history.undoBlockBegin();
+  } catch {
+    block = null;
+  }
+  try {
+    return await fn();
+  } finally {
+    if (block) {
+      try {
+        penpot.history.undoBlockFinish(block);
+      } catch {
+        // History is best effort.
+      }
+    }
+  }
+}
+
+function removeQuietly(shape: Shape | null | undefined) {
+  try {
+    shape?.remove();
+  } catch {
+    // Already gone.
+  }
+}
+
+// Text layout is asynchronous: freshly created or edited texts reach the
+// markup up to ~1 s later. Poll until every visible text shows a word of its
+// content and two consecutive renders agree.
+const SETTLE_MIN_MS = 150;
+const SETTLE_MAX_MS = 3000;
+const SETTLE_POLL_MS = 120;
+// Every call numbers its defs ("render-123") and stroke ids get fresh
+// uuids: compare renders without any of them.
+const VOLATILE_IDS_RE = /render-\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+function textProbes(root: Shape): string[] {
+  const probes: string[] = [];
+  const visit = (shape: Shape) => {
+    if (shape.hidden) return;
+    if (shape.type === 'text') {
+      const word = /[A-Za-z0-9]{2,10}/.exec((shape as Text).characters ?? '')?.[0];
+      if (word) probes.push(word);
+      return;
+    }
+    readChildren(shape).forEach(visit);
+  };
+  visit(root);
+  return probes;
+}
+
+async function settledMarkup(shape: Shape): Promise<string | undefined> {
+  const probes = textProbes(shape);
+  const started = Date.now();
+  let previous: string | undefined;
+  for (;;) {
+    const markup = safeMarkup(shape);
+    const elapsed = Date.now() - started;
+    const complete = markup !== undefined && probes.every((p) => markup.includes(p));
+    const stable = markup !== undefined && markup.replace(VOLATILE_IDS_RE, '') === previous;
+    if ((complete && stable && elapsed >= SETTLE_MIN_MS) || elapsed >= SETTLE_MAX_MS) {
+      return markup;
+    }
+    previous = markup?.replace(VOLATILE_IDS_RE, '');
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+  }
+}
+
+// Markup of temporary instances of each component (media inlined; an
+// unreadable picture is left as is rather than failing the preview).
+async function renderComponents(comps: LibraryComponent[]): Promise<(string | undefined)[]> {
+  const instances: Shape[] = [];
+  try {
+    comps.forEach((comp, i) => {
+      const instance = comp.instance();
+      instance.x = SCRATCH_X;
+      instance.y = SCRATCH_Y + i * 5000;
+      instances.push(instance);
+    });
+    const out: (string | undefined)[] = [];
+    for (const instance of instances) {
+      const raw = await settledMarkup(instance);
+      out.push(raw ? await inlineMedia(raw, true) : undefined);
+    }
+    return out;
+  } catch {
+    return comps.map(() => undefined);
+  } finally {
+    instances.forEach(removeQuietly);
+  }
+}
+
+async function handleRenderSlide(requestId: string, slide: Slide) {
+  try {
+    const result = await exclusive(() =>
+      withUndoBlock(async () => {
+        const track = new Map<string, string>();
+        const board = createBoardForSlide(slide, `Slide preview · ${slide.name}`);
+        try {
+          board.x = SCRATCH_X;
+          board.y = SCRATCH_Y;
+          await populateSlide(board, slide, [], track);
+          const raw = await settledMarkup(board);
+          if (!raw) throw new Error('Penpot returned no markup for the slide.');
+          return { svg: (await inlineMedia(raw, true)) ?? raw, shapes: Object.fromEntries(track) };
+        } finally {
+          removeQuietly(board);
+        }
+      })
+    );
+    send({ type: 'slide-render', requestId, slideId: slide.id, ...result });
+  } catch (err) {
+    send({ type: 'slide-render', requestId, slideId: slide.id, svg: null, shapes: {}, message: stringifyErr(err) });
   }
 }
 
@@ -1003,10 +1143,48 @@ function safeName(shape: Shape): string | undefined {
 function safeMarkup(shape: Shape): string | undefined {
   try {
     const svg = penpot.generateMarkup([shape], { type: 'svg' });
-    return svg && svg.includes('<svg') ? svg : undefined;
+    return svg && svg.includes('<svg') ? onlyRootTree(svg, shape.id) : undefined;
   } catch {
     return undefined;
   }
+}
+
+// generateMarkup([shape]) emits the shape's tree and then every descendant
+// again as a top-level group — outside the board's clip and painted over the
+// original (semi-transparent layers double up). Keep the root's tree only.
+const TAG_RE = /<(\/?)([A-Za-z][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+
+function onlyRootTree(svg: string, rootId: string): string {
+  const cuts: [number, number][] = [];
+  let depth = 0;
+  let cutStart = -1;
+  let rootSeen = false;
+  TAG_RE.lastIndex = 0;
+  for (let m = TAG_RE.exec(svg); m; m = TAG_RE.exec(svg)) {
+    const [full, closing, name, attrs, selfClosing] = m;
+    if (closing) {
+      depth--;
+      if (cutStart >= 0 && depth === 1) {
+        cuts.push([cutStart, m.index + full.length]);
+        cutStart = -1;
+      }
+      continue;
+    }
+    if (depth === 1 && cutStart < 0 && name === 'g') {
+      const id = /\bid="shape-([0-9a-f-]{36})"/.exec(attrs)?.[1];
+      if (id === rootId) rootSeen = true;
+      else if (id) cutStart = m.index;
+    }
+    if (!selfClosing) depth++;
+  }
+  if (!rootSeen || cuts.length === 0) return svg;
+  let out = '';
+  let from = 0;
+  for (const [start, end] of cuts) {
+    out += svg.slice(from, start);
+    from = end;
+  }
+  return out + svg.slice(from);
 }
 
 // Percent-encoding instead of base64: no TextEncoder needed in the sandbox.
@@ -1073,15 +1251,15 @@ async function mediaDataUrl(id: string): Promise<string | null> {
 }
 
 // The markup with every asset URL replaced by a data URL, or undefined when
-// some image could not be read.
-async function inlineMedia(svg: string): Promise<string | undefined> {
+// some image could not be read (`loose` keeps the unreadable ones instead).
+async function inlineMedia(svg: string, loose = false): Promise<string | undefined> {
   if (!hasMedia(svg)) return svg;
   const ids = [...new Set([...svg.matchAll(MEDIA_URL_RE)].map((m) => m[1]))];
   const urls = new Map<string, string>();
   for (const id of ids) {
     const url = await mediaDataUrl(id);
-    if (!url) return undefined;
-    urls.set(id, url);
+    if (url) urls.set(id, url);
+    else if (!loose) return undefined;
   }
   return svg.replace(MEDIA_URL_RE, (_match, id: string) => urls.get(id) ?? _match);
 }
@@ -1286,7 +1464,12 @@ function createBoardForSlide(slide: Slide, name: string): Board {
   return board;
 }
 
-async function populateSlide(board: Board, slide: Slide, warnings: string[]) {
+async function populateSlide(
+  board: Board,
+  slide: Slide,
+  warnings: string[],
+  track?: Map<string, string>
+) {
   // Library slide without extracted nodes: drop in a linked instance.
   if (slide.template && slide.nodes.length === 0) {
     const found = findLibraryComponent(slide.template.libraryId, slide.template.componentId);
@@ -1303,7 +1486,7 @@ async function populateSlide(board: Board, slide: Slide, warnings: string[]) {
 
   // SlideNode coordinates are slide-relative; Penpot coordinates are
   // absolute, so offset by the board's (post-layout) position.
-  await populateNodes(board, slide.nodes, board.x, board.y, warnings);
+  await populateNodes(board, slide.nodes, board.x, board.y, warnings, track);
 }
 
 // Recursive populator. Nodes are appended in model order (bottom → top):
@@ -1314,14 +1497,19 @@ async function populateNodes(
   nodes: SlideNode[],
   offsetX: number,
   offsetY: number,
-  warnings: string[]
+  warnings: string[],
+  // Records created shape id → node id (top level only, for the renderer).
+  track?: Map<string, string>
 ): Promise<Shape[]> {
   const created: Shape[] = [];
   for (const node of nodes) {
     if (!node.visible) continue;
     try {
       const shape = await createShapeForNode(parent, node, offsetX + node.x, offsetY + node.y, warnings);
-      if (shape) created.push(shape);
+      if (shape) {
+        created.push(shape);
+        track?.set(shape.id, node.id);
+      }
     } catch (err) {
       warnings.push(`Could not create "${node.name}": ${stringifyErr(err)}`);
     }
@@ -1348,7 +1536,7 @@ async function createShapeForNode(
         inner.clipContent = node.clipContent ?? false;
         if (node.borderRadius) inner.borderRadius = node.borderRadius;
         inner.fills = node.fills && node.fills.length > 0 ? (clonePlain(node.fills) as Fill[]) : [];
-        if (node.imageReplaced) inner.fills = await withReplacedImage(inner.fills as Fill[], node);
+        if (node.imageReplaced) inner.fills = await withReplacedImage(inner.fills as Fill[], node, warnings);
         if (node.strokes?.length) inner.strokes = clonePlain(node.strokes) as Stroke[];
         await populateNodes(inner, node.children ?? [], absX, absY, warnings);
         return inner;
@@ -1380,7 +1568,7 @@ async function createShapeForNode(
       rect.name = node.name;
       parent.appendChild(rect);
       applyFillsAndStrokes(rect, node, { fill: '#d0d0d0' });
-      if (node.imageReplaced) rect.fills = await withReplacedImage(rect.fills as Fill[], node);
+      if (node.imageReplaced) rect.fills = await withReplacedImage(rect.fills as Fill[], node, warnings);
       if (node.borderRadius) rect.borderRadius = node.borderRadius;
       place(rect, node, absX, absY);
       return rect;
@@ -1391,7 +1579,7 @@ async function createShapeForNode(
       ellipse.name = node.name;
       parent.appendChild(ellipse);
       applyFillsAndStrokes(ellipse, node, { fill: '#ffffff' });
-      if (node.imageReplaced) ellipse.fills = await withReplacedImage(ellipse.fills as Fill[], node);
+      if (node.imageReplaced) ellipse.fills = await withReplacedImage(ellipse.fills as Fill[], node, warnings);
       place(ellipse, node, absX, absY);
       return ellipse;
     }
@@ -1508,7 +1696,7 @@ async function createVectorOrImage(
     parent.appendChild(path);
     path.d = node.pathData;
     const fills = clonePlain((node.fills ?? []) as Fill[]);
-    path.fills = node.imageReplaced ? await withReplacedImage(fills, node) : fills;
+    path.fills = node.imageReplaced ? await withReplacedImage(fills, node, warnings) : fills;
     // New paths come with a default black stroke; always set the real ones.
     path.strokes = clonePlain((node.strokes ?? []) as Stroke[]);
     place(path, node, absX, absY);
@@ -1538,6 +1726,7 @@ async function createVectorOrImage(
   } else if (node.imageUrl) {
     const image = await uploadDataUrl(node.name, node.imageUrl);
     if (image) rect.fills = [{ fillOpacity: 1, fillImage: image }];
+    else warnings.push(`Penpot rejected the picture of "${node.name}".`);
     if (node.borderRadius) rect.borderRadius = node.borderRadius;
   } else {
     warnings.push(`"${node.name}" has no visual source — inserted an empty placeholder.`);
@@ -1548,21 +1737,41 @@ async function createVectorOrImage(
   return rect;
 }
 
-async function uploadDataUrl(name: string, dataUrl: string) {
-  const match = /^data:([^;,]+)(;base64)?,(.*)$/.exec(dataUrl);
-  if (!match) return null;
-  const bytes = match[2]
-    ? base64ToUint8Array(match[3])
-    : new Uint8Array([...decodeURIComponent(match[3])].map((c) => c.charCodeAt(0) & 0xff));
-  return penpot.uploadMediaData(name, bytes, match[1]);
+// Uploads are cached per content: live renders rebuild the slide after every
+// edit and must not re-upload the same picture each time. Rejected files are
+// remembered too (Penpot takes seconds to refuse an unsupported image).
+const uploadCache = new Map<string, Promise<ImageData | null>>();
+
+function uploadDataUrl(name: string, dataUrl: string): Promise<ImageData | null> {
+  const key = hashString(dataUrl);
+  let upload = uploadCache.get(key);
+  if (!upload) {
+    upload = (async () => {
+      const match = /^data:([^;,]+)(;base64)?,(.*)$/.exec(dataUrl);
+      if (!match) return null;
+      const bytes = match[2]
+        ? base64ToUint8Array(match[3])
+        : new Uint8Array([...decodeURIComponent(match[3])].map((c) => c.charCodeAt(0) & 0xff));
+      try {
+        return (await penpot.uploadMediaData(name, bytes, match[1])) ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    uploadCache.set(key, upload);
+  }
+  return upload;
 }
 
 // Swap the template's image fill for the picture chosen in the editor,
 // keeping every other fill (overlays, tints) of the stack.
-async function withReplacedImage(fills: Fill[], node: SlideNode): Promise<Fill[]> {
+async function withReplacedImage(fills: Fill[], node: SlideNode, warnings: string[]): Promise<Fill[]> {
   if (!node.imageUrl) return fills;
   const image = await uploadDataUrl(node.name, node.imageUrl);
-  if (!image) return fills;
+  if (!image) {
+    warnings.push(`Penpot rejected the picture of "${node.name}" — the template image was kept.`);
+    return fills;
+  }
   const replacement: Fill = { fillOpacity: 1, fillImage: image };
   const idx = fills.findIndex((f) => f.fillImage);
   if (idx === -1) return [...fills, replacement];

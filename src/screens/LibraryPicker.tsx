@@ -4,6 +4,7 @@ import { penpotApi } from '../api';
 import { getFilteredComponents } from '../utils';
 import { applyTemplates, itemFromComponent } from '../templateActions';
 import type { ComponentInfo } from '../types';
+import Thumbnail from '../components/Thumbnail';
 
 export default function LibraryPicker() {
   const libraries = useSlideStore((s) => s.libraries);
@@ -243,7 +244,9 @@ function ComponentCard({ component, selected, order, showOrder, onToggle, onQuic
           </span>
         )}
         {thumbnail ? (
-          <img className="component-preview-img" src={thumbnail} alt={component.name} draggable={false} />
+          <div className="component-preview-img">
+            <Thumbnail src={thumbnail} alt={component.name} />
+          </div>
         ) : isPending ? (
           <div className="component-preview-loading">
             <div className="spinner spinner--sm" />

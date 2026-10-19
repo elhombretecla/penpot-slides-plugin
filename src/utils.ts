@@ -328,13 +328,21 @@ export function ensureFontLoaded(family: string | undefined | null): void {
   if (LOADED_FONT_FAMILIES.has(clean)) return;
   LOADED_FONT_FAMILIES.add(clean);
 
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href =
-    `https://fonts.googleapis.com/css2?family=${encodeURIComponent(clean).replace(/%20/g, '+')}` +
-    `:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,400;1,700&display=swap`;
-  link.crossOrigin = 'anonymous';
-  document.head.appendChild(link);
+  const query = encodeURIComponent(clean).replace(/%20/g, '+');
+  const add = (query: string, onError?: () => void) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = `https://fonts.googleapis.com/css2?family=${query}&display=swap`;
+    link.crossOrigin = 'anonymous';
+    if (onError) link.onerror = onError;
+    document.head.appendChild(link);
+  };
+  // Google rejects the whole request when one weight/style doesn't exist
+  // (single-weight display fonts…): fall back to the family's default.
+  add(
+    `${query}:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,400;1,700`,
+    () => add(query)
+  );
 }
 
 // Return a CSS `font-family` value with safe fallbacks, and request the

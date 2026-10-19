@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { useSlideStore } from '../store';
 import { penpotApi } from '../api';
 import type { DeckSummary, LibraryInfo } from '../types';
+import SvgView from '../components/SvgView';
+import { findRender } from '../render/renderer';
 
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
@@ -159,7 +161,7 @@ function DeckRow({ deck }: { deck: DeckSummary }) {
     <div className="deck-row">
       <button className="deck-row-main" onClick={() => penpotApi.loadDeck(deck.id)}>
         <span className="deck-row-thumb" style={{ aspectRatio: String(ratio) }}>
-          <span className="body-xs">{deck.slideCount}</span>
+          <DeckCover coverKey={deck.coverKey} fallback={deck.slideCount} />
         </span>
         <span className="deck-row-info">
           <span className="body-s deck-row-name">{deck.name}</span>
@@ -185,6 +187,21 @@ function DeckRow({ deck }: { deck: DeckSummary }) {
       )}
     </div>
   );
+}
+
+// First slide as Penpot rendered it the last time the deck was edited on
+// this device; the slide count otherwise.
+function DeckCover({ coverKey, fallback }: { coverKey?: string; fallback: number }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (coverKey) void findRender(coverKey).then((r) => alive && setSvg(r?.svg ?? null));
+    return () => {
+      alive = false;
+    };
+  }, [coverKey]);
+  if (svg) return <SvgView svg={svg} className="deck-row-cover" />;
+  return <span className="body-xs">{fallback}</span>;
 }
 
 // Shared libraries of the team that this file is not using yet.

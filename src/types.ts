@@ -211,6 +211,8 @@ export interface DeckSummary {
   width: number;
   height: number;
   libraryName?: string;
+  // Render-cache key of the first slide, for the cover on the home screen.
+  coverKey?: string;
 }
 
 // ─── Library & Component info (from plugin side) ──────────────────────────────
@@ -367,6 +369,9 @@ export type UIMessage =
   | { type: 'load-deck'; deckId: string }
   | { type: 'save-deck'; requestId: string; deck: string; summary: DeckSummary }
   | { type: 'delete-deck'; deckId: string }
+  // Build the slide off-canvas exactly as "Insert" would and send back
+  // Penpot's own SVG rendering of it.
+  | { type: 'render-slide'; requestId: string; slide: Slide }
   | { type: 'resize'; width: number; height: number };
 
 export type PluginMessage =
@@ -374,6 +379,7 @@ export type PluginMessage =
   | { type: 'available-libraries'; libraries: AvailableLibrary[] }
   | { type: 'library-connected'; libraryId: string }
   | { type: 'catalog'; requestId: string; catalog: LibraryCatalog }
+  // `thumbnail` is either Penpot SVG markup ("<svg…") or an image data URL.
   | { type: 'thumbnail'; requestId: string; componentId: string; thumbnail: string; signature: string }
   | { type: 'thumbnails-complete'; requestId: string }
   | { type: 'import-start'; requestId: string; total: number }
@@ -405,5 +411,15 @@ export type PluginMessage =
   | { type: 'decks'; decks: DeckSummary[] }
   | { type: 'deck-loaded'; deckId: string; deck: string | null }
   | { type: 'deck-saved'; requestId: string; deckId: string; ok: boolean; message?: string }
+  | {
+      type: 'slide-render';
+      requestId: string;
+      slideId: string;
+      // Penpot markup of the slide board (media inlined) or null on failure.
+      svg: string | null;
+      // Created Penpot shape id → top-level SlideNode id.
+      shapes: Record<string, string>;
+      message?: string;
+    }
   | { type: 'error'; message: string }
   | { type: 'theme'; theme: string };

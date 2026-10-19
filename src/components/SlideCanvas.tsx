@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSlideStore } from '../store';
 import { useElementSize } from '../hooks';
 import type { Slide, SlideNode } from '../types';
@@ -14,6 +14,9 @@ import {
   slideBackgroundCss,
 } from '../utils';
 import { cloneNodeWithNewIds } from '../deck';
+import { planRender, type RenderPlan } from '../render/plan';
+import { useRenderStore } from '../render/renderer';
+import SvgView from './SvgView';
 
 interface Props {
   slide: Slide | null;
@@ -290,6 +293,19 @@ export default function SlideCanvas({ slide }: Props) {
   const scale = fitScale * zoom;
   const displayW = slideWidth * scale;
   const displayH = slideHeight * scale;
+
+  // Penpot render under the interactive HTML layer. The node being typed into
+  // is always drawn live, as is anything changed since the last render.
+  const renderEnabled = useRenderStore((s) => s.enabled);
+  const slideRender = useRenderStore((s) => (slide ? s.renders[slide.id] : undefined));
+  const liveTopId = useMemo(
+    () => (slide && editingNodeId ? topLevelIdOf(slide.nodes, editingNodeId) : null),
+    [slide, editingNodeId]
+  );
+  const plan: RenderPlan | null = useMemo(
+    () => (slide && renderEnabled ? planRender(slide, slideRender, liveTopId) : null),
+    [slide, renderEnabled, slideRender, liveTopId]
+  );
 
   function toSlideCoords(canvasX: number, canvasY: number) {
     return { x: canvasX / scale, y: canvasY / scale };
@@ -627,11 +643,13 @@ export default function SlideCanvas({ slide }: Props) {
           onMouseLeave={() => { mouseSlidePosRef.current = null; }}
         >
           <div className="canvas-bg" style={{ position: 'absolute', inset: 0 }} />
+          {plan && <SvgView svg={plan.render.svg} hiddenNodes={plan.hidden} className="canvas-render" />}
 
           {slide.nodes.map((node) => (
               <CanvasNode
                 key={node.id}
                 node={node}
+                ghost={!!plan && !plan.html.has(node.id)}
                 scale={scale}
                 slideId={slide.id}
                 activeTool={activeTool}
@@ -681,6 +699,10 @@ const noop = () => {};
 // the editor (clipping, image fills, text styles) — used for slide thumbnails.
 export function SlidePreview({ slide, width }: { slide: Slide; width: number }) {
   const scale = width / Math.max(1, slide.width);
+  const enabled = useRenderStore((s) => s.enabled);
+  const render = useRenderStore((s) => s.renders[slide.id]);
+  const plan = useMemo(() => (enabled ? planRender(slide, render) : null), [enabled, slide, render]);
+  const nodes = plan ? slide.nodes.filter((n) => plan.html.has(n.id)) : slide.nodes;
   return (
     <div
       className="slide-preview"
@@ -693,7 +715,8 @@ export function SlidePreview({ slide, width }: { slide: Slide; width: number }) 
         pointerEvents: 'none',
       }}
     >
-      {slide.nodes.map((node) => (
+      {plan && <SvgView svg={plan.render.svg} hiddenNodes={plan.hidden} className="canvas-render" />}
+      {nodes.map((node) => (
         <CanvasNode
           key={node.id}
           node={node}
@@ -716,10 +739,19 @@ export function SlidePreview({ slide, width }: { slide: Slide; width: number }) 
 
 const EMPTY_IDS: string[] = [];
 
+// Top-level node whose subtree contains `id`.
+function topLevelIdOf(nodes: SlideNode[], id: string): string | null {
+  const contains = (n: SlideNode): boolean => n.id === id || (n.children ?? []).some(contains);
+  return nodes.find(contains)?.id ?? null;
+}
+
 // ─── Canvas Node (recursive) ──────────────────────────────────────────────────
 
 interface CanvasNodeProps {
   node: SlideNode;
+  // Drawn by the Penpot render underneath: keep the node interactive
+  // (selection, drag, handles) but don't paint it.
+  ghost?: boolean;
   scale: number;
   slideId: string;
   activeTool: Tool;
@@ -735,6 +767,7 @@ interface CanvasNodeProps {
 
 function CanvasNode({
   node,
+  ghost = false,
   scale,
   slideId,
   activeTool,
@@ -811,6 +844,7 @@ function CanvasNode({
             background: groupBg,
             borderRadius: node.borderRadius ? node.borderRadius * scale : undefined,
             overflow: node.clipContent ? 'hidden' : 'visible',
+            opacity: ghost ? 0 : undefined,
           }}
         >
           {node.children?.map((child) => (
@@ -997,7 +1031,7 @@ function CanvasNode({
       data-node-id={node.id}
       data-node-type={node.type}
     >
-      {content}
+      {ghost ? <div className="canvas-node-ghost">{content}</div> : content}
       {isSelected && !isEditing && activeTool === 'select' && (
         <ResizeHandles
           node={node}

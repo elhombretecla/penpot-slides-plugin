@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSlideStore } from '../store';
 import type { Slide, SlideNode } from '../types';
 import { makeEllipseNode, makeImageNode, makeRectNode, makeTextNode, readImageFile } from '../utils';
+import Thumbnail from './Thumbnail';
 
 interface Props { slide: Slide | null; }
 
@@ -129,7 +130,7 @@ export default function InsertPanel({ slide }: Props) {
                 onClick={() => useSlideStore.getState().requestAsset(slide.id, c.libraryId, c.id)}
               >
                 {thumbnails[c.id] ? (
-                  <img src={thumbnails[c.id]} alt="" draggable={false} />
+                  <Thumbnail src={thumbnails[c.id]} />
                 ) : (
                   <span className="insert-asset-placeholder">{c.name.slice(0, 2).toUpperCase()}</span>
                 )}

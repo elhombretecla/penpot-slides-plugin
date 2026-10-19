@@ -9,6 +9,8 @@ import PropertiesPanel from '../components/PropertiesPanel';
 import LayersPanel from '../components/LayersPanel';
 import InsertPanel from '../components/InsertPanel';
 import ExportPanel from '../components/ExportPanel';
+import Thumbnail from '../components/Thumbnail';
+import RenderToggle from '../components/RenderToggle';
 
 export default function SlideManager() {
   const slides = useSlideStore((s) => s.slides);
@@ -48,6 +50,7 @@ export default function SlideManager() {
         <SaveIndicator />
 
         <div className="manager-topbar-actions">
+          <RenderToggle slide={activeSlide} />
           <button
             data-appearance="primary"
             onClick={() => setShowExportPanel(true)}
@@ -221,7 +224,7 @@ function AddSlideMenu() {
                     }}
                   >
                     {thumbnails[c.id] ? (
-                      <img src={thumbnails[c.id]} alt="" draggable={false} />
+                      <Thumbnail src={thumbnails[c.id]} />
                     ) : (
                       <span className="add-slide-layout-placeholder" />
                     )}

@@ -4,6 +4,8 @@ import { useSlideStore } from './store';
 import type { PluginMessage } from './types';
 import { parseDeck } from './deck';
 import { onDeckSaved, startAutosave } from './autosave';
+import { receiveSlideRender, startRenderer } from './render/renderer';
+import { isSvgMarkup, prepareSvg } from './render/svg';
 import { finishTemplateJob } from './templateActions';
 import { penpotApi } from './api';
 import HomeScreen from './screens/HomeScreen';
@@ -12,6 +14,9 @@ import SlideManager from './screens/SlideManager';
 import NewSlideModal from './components/NewSlideModal';
 import ImportProgressOverlay from './components/ImportProgressOverlay';
 import Notices from './components/Notices';
+
+// Gallery cards are small: embedded pictures are downscaled to this size.
+const THUMBNAIL_IMAGE_MAX = 480;
 
 export default function App() {
   const screen = useSlideStore((s) => s.screen);
@@ -32,6 +37,7 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => startAutosave(), []);
+  useEffect(() => startRenderer(), []);
 
   // Listen to messages from plugin.ts
   useEffect(() => {
@@ -68,7 +74,18 @@ export default function App() {
           break;
 
         case 'thumbnail':
-          store.setThumbnail(data.requestId, data.componentId, data.thumbnail, data.signature);
+          if (isSvgMarkup(data.thumbnail)) {
+            const { requestId, componentId, signature } = data;
+            void prepareSvg(data.thumbnail, THUMBNAIL_IMAGE_MAX).then((svg) =>
+              useSlideStore.getState().setThumbnail(requestId, componentId, svg, signature)
+            );
+          } else {
+            store.setThumbnail(data.requestId, data.componentId, data.thumbnail, data.signature);
+          }
+          break;
+
+        case 'slide-render':
+          void receiveSlideRender(data.requestId, data.svg, data.shapes, data.message);
           break;
 
         case 'thumbnails-complete':

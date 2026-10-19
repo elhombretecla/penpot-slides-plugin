@@ -27,5 +27,6 @@ export const penpotApi = {
   saveDeck: (requestId: string, deck: string, summary: DeckSummary) =>
     send({ type: 'save-deck', requestId, deck, summary }),
   deleteDeck: (deckId: string) => send({ type: 'delete-deck', deckId }),
+  renderSlide: (requestId: string, slide: Slide) => send({ type: 'render-slide', requestId, slide }),
   resize: (width: number, height: number) => send({ type: 'resize', width, height }),
 };
